@@ -1,0 +1,125 @@
+# Karibu POS — production-style stack (load balanced)
+#
+#   docker compose -f docker-compose.prod.yml up --build
+#
+# Topology:
+#   nginx  ──load-balances──▶  app1 / app2 / app3   (stateless Gunicorn)
+#                                     │
+#                       ┌────────────┴────────────┐
+#                    postgres                    redis
+#            (durable data)          (shared rate-limit + token cache)
+#
+#   scheduler = a SINGLE extra app instance that runs the billing sweep, so
+#   dunning/renewal jobs fire exactly once regardless of replica count.
+#
+# Why this is safe to scale horizontally:
+#   - The app holds no in-process session state (JWT is stateless).
+#   - Rate limiting uses Redis, so a limit means the same thing on every replica.
+#   - Billing mutations are guarded by row locks + a DB unique index, so even
+#     with many replicas a charge can't be applied twice.
+
+x-app-env: &app-env
+  ENV: production
+  DATABASE_URL: postgresql://karibu:${DB_PASSWORD:-karibu}@postgres:5432/karibu_pos
+  RATELIMIT_STORAGE_URI: redis://redis:6379/0
+  SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+  FORCE_HTTPS: "true"
+  
+  MPESA_ENV: ${MPESA_ENV:-sandbox}
+  MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY:-}
+  MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET:-}
+  MPESA_SHORTCODE: ${MPESA_SHORTCODE:-174379}
+  MPESA_PASSKEY: ${MPESA_PASSKEY:-}
+  MPESA_CALLBACK_URL: ${MPESA_CALLBACK_URL:-}
+  MPESA_CALLBACK_SECRET: ${MPESA_CALLBACK_SECRET:?set MPESA_CALLBACK_SECRET}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: karibu
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-karibu}
+      POSTGRES_DB: karibu_pos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U karibu"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    restart: unless-stopped
+
+  # --- Migrations run once before the app replicas start -------------------
+  migrate:
+    build: ../backend
+    command: alembic upgrade head
+    environment:
+      <<: *app-env
+      ENABLE_SCHEDULER: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # --- App replicas (load balanced, scheduler OFF) -------------------------
+  app1: &app
+    build: ../backend
+    command: gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers 3 --bind 0.0.0.0:8000 --timeout 60
+    environment:
+      <<: *app-env
+      ENABLE_SCHEDULER: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  app2:
+    <<: *app
+
+  app3:
+    <<: *app
+
+  # --- Scheduler: exactly ONE instance runs the billing sweep --------------
+  scheduler:
+    build: ../backend
+    command: gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:8000
+    environment:
+      <<: *app-env
+      ENABLE_SCHEDULER: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  # --- Edge: TLS termination + load balancing ------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./proxy_params.conf:/etc/nginx/proxy_params.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - app1
+      - app2
+      - app3
+    restart: unless-stopped
+
+volumes:
+  pgdata:

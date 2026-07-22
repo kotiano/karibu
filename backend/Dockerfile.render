@@ -1,0 +1,42 @@
+# Karibu POS backend — Render deployment image.
+#
+# Differs from the VPS Dockerfile in two ways that matter for Render:
+#   1. Binds to Render's injected $PORT (not a hardcoded 8000).
+#   2. Runs `alembic upgrade head` before starting the app, so the managed
+#      Postgres schema is created/updated on every deploy.
+#
+# Render terminates TLS and load-balances for you, so there's no nginx/Redis
+# here — the rate limiter falls back to in-process memory (fine for the
+# single-instance starter tier). If you scale to multiple instances later,
+# set RATELIMIT_STORAGE_URI to a Redis URL.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+
+RUN useradd --create-home appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Render provides $PORT. Run migrations first, then start Gunicorn bound to it.
+# Scheduler runs in-process here (ENABLE_SCHEDULER=true) since the starter tier
+# is a single instance — the billing sweep fires exactly once. If you scale out,
+# move the scheduler to a separate Render Background Worker and set
+# ENABLE_SCHEDULER=false on the web service.
+CMD alembic upgrade head && \
+    gunicorn app.main:app \
+      --worker-class uvicorn.workers.UvicornWorker \
+      --workers 2 \
+      --bind 0.0.0.0:${PORT:-8000} \
+      --timeout 60

@@ -1,0 +1,94 @@
+# Subscription & Billing — how it works
+
+Karibu POS is sold as a per-restaurant SaaS subscription: **KSh 500/month**,
+billed via **M-Pesa STK Push**, after a **14-day free trial**.
+
+## Lifecycle
+
+```
+   register ──▶ TRIALING (14 days, full access, no charge)
+                   │
+        trial ends │ (billing sweep detects it)
+                   ▼
+             STK Push for KSh 500
+              │              │
+         success          failure
+              │              │
+              ▼              ▼
+           ACTIVE         PAST_DUE ──retry (0h,+1d,+3d,+5d)──┐
+              │              │                                │
+   period ends│              └── all retries fail ──▶ SUSPENDED (access revoked)
+              ▼                                            │
+        renewal STK Push                          owner pays ──▶ ACTIVE
+```
+
+- **TRIALING** — created on signup. Full access until `trial_ends_at`.
+- **ACTIVE** — paid and current. Renews at `current_period_end`.
+- **PAST_DUE** — a charge failed; still has access during the retry window.
+- **SUSPENDED** — retries exhausted; POS access blocked (billing still open).
+- **CANCELLED** — owner cancelled.
+
+## Who is billed
+
+One subscription **per restaurant**. The owner's M-Pesa number
+(`billing_phone`) receives the STK prompt; all staff share access. This is set
+at signup and editable when paying.
+
+## How charges happen
+
+There are two triggers, both funnelling through the same idempotent
+`billing.initiate_charge()`:
+
+1. **Automatic** — a background sweep (every 15 min) finds subscriptions whose
+   trial ended, period elapsed, or dunning retry is due, and charges them.
+2. **Manual** — the owner taps *Subscribe now* / *Pay now* in the app
+   (`POST /api/billing/pay`), e.g. to convert a trial early or clear a past-due
+   balance.
+
+Either way, the STK prompt appears on the owner's phone; they enter their PIN;
+Safaricom calls our callback; the subscription advances to ACTIVE.
+
+## Why it can't double-charge
+
+See `SECURITY.md` → "Billing integrity". In short: a DB unique index allows only
+one open charge per period, row locks serialise concurrent attempts, idempotency
+keys collapse duplicate requests, and duplicate/late M-Pesa callbacks are
+ignored against terminal charges.
+
+## Configuration
+
+All tunable via environment (see `backend/.env.example`):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SUBSCRIPTION_PRICE_CENTS` | `50000` | KSh 500.00 |
+| `TRIAL_DAYS` | `14` | Free trial length |
+| `BILLING_PERIOD_DAYS` | `30` | Billing cycle |
+| `DUNNING_RETRY_HOURS` | `0,24,72,120` | Retry offsets; count = attempts before suspension |
+| `CHARGE_STALE_MINUTES` | `10` | Auto-fail an STK with no callback |
+
+## Endpoints
+
+| Method | Path | Who | Purpose |
+|--------|------|-----|---------|
+| GET | `/api/billing/subscription` | any staff | Current status |
+| POST | `/api/billing/pay` | owner | Charge now / retry (idempotent) |
+| GET | `/api/billing/charges` | owner/manager | Payment history |
+| POST | `/api/billing/callback/<secret>` | Safaricom | STK result (verified, idempotent) |
+
+## Testing without real M-Pesa keys
+
+If `MPESA_CONSUMER_KEY`/`SECRET`/`PASSKEY` are unset, the client **simulates**
+the STK push and returns a fake `CheckoutRequestID`. The rest of the flow
+(charge rows, callback processing, state transitions) is identical, so the whole
+lifecycle is exercisable in development. To drive a "payment", POST a callback:
+
+```bash
+curl -X POST http://localhost:8000/api/billing/callback/$MPESA_CALLBACK_SECRET \
+  -H "Content-Type: application/json" \
+  -d '{"Body":{"stkCallback":{"CheckoutRequestID":"<id-from-charge>","ResultCode":0,
+       "CallbackMetadata":{"Item":[{"Name":"MpesaReceiptNumber","Value":"QGH7XYZ12"}]}}}}'
+```
+
+For real integration, set the Daraja credentials and a public
+`MPESA_CALLBACK_URL` (use ngrok in dev), and the same code path goes live.
