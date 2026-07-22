@@ -1,4 +1,11 @@
-# Karibu POS backend (FastAPI) image.
+# Karibu POS backend (FastAPI) — single portable production image.
+#
+# Works the same locally, from Docker Hub, and on any PaaS:
+#   - binds $PORT (defaults to 8000) so hosts that inject a port just work
+#   - runs `alembic upgrade head` on start, so the schema is always current
+#
+# Build:  docker build -t karibu-pos-api:latest ./backend
+# Run:    docker run -p 8000:8000 --env-file backend/.env karibu-pos-api:latest
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -21,9 +28,13 @@ USER appuser
 
 EXPOSE 8000
 
-# Uvicorn workers behind Gunicorn's process manager. Async workers handle the
-# outbound M-Pesa calls efficiently. Scale replicas via the orchestrator, not
-# just workers, for real horizontal load balancing.
-CMD ["gunicorn", "app.main:app", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--workers", "3", "--bind", "0.0.0.0:8000", "--timeout", "60"]
+# Migrate, then serve. Uvicorn workers under Gunicorn's process manager: async
+# workers handle the outbound M-Pesa calls without blocking.
+# NOTE: with more than one instance, run the scheduler separately and set
+# ENABLE_SCHEDULER=false here, or the billing sweep fires once per instance.
+CMD alembic upgrade head && \
+    gunicorn app.main:app \
+      --worker-class uvicorn.workers.UvicornWorker \
+      --workers 2 \
+      --bind 0.0.0.0:${PORT:-8000} \
+      --timeout 60
