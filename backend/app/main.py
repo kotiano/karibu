@@ -98,6 +98,7 @@ async def limit_body_size(request: Request, call_next):
 
 
 # --- Security headers --------------------------------------------------------
+# --- Security headers --------------------------------------------------------
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     try:
@@ -116,7 +117,9 @@ async def security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "0"
     response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     response.headers.setdefault("Cache-Control", "no-store")
-
+    if settings.FORCE_HTTPS:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 # --- Exception handlers → uniform JSON envelope -----------------------------
 @app.exception_handler(APIError)
