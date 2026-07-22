@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     MPESA_ENV: str = "sandbox"  # sandbox | production
     MPESA_CONSUMER_KEY: str = ""
     MPESA_CONSUMER_SECRET: str = ""
+    # Paybill number, OR — if you use a till — the STORE (head office) number.
     MPESA_SHORTCODE: str = "174379"
+    # Set ONLY if you pay into a till (Buy Goods). Leave blank for a paybill.
+    MPESA_TILL_NUMBER: str = ""
     MPESA_PASSKEY: str = ""
     MPESA_CALLBACK_URL: str = ""
     MPESA_CALLBACK_SECRET: str = "change-me-callback"

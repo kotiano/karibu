@@ -8,7 +8,7 @@ import contextlib
 import logging
 import os
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -100,16 +100,22 @@ async def limit_body_size(request: Request, call_next):
 # --- Security headers --------------------------------------------------------
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except RuntimeError as exc:
+        # Starlette's BaseHTTPMiddleware raises "No response returned." when the
+        # client goes away mid-request. Common on hosts that sleep: the app times
+        # out during a cold start and disconnects before we finish. Nothing is
+        # actually wrong, so don't emit a 500 and a stack trace for it.
+        if "No response returned" in str(exc) and await request.is_disconnected():
+            return Response(status_code=204)
+        raise
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-XSS-Protection"] = "0"
     response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     response.headers.setdefault("Cache-Control", "no-store")
-    if settings.FORCE_HTTPS:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    return response
 
 
 # --- Exception handlers → uniform JSON envelope -----------------------------
