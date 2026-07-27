@@ -1,9 +1,7 @@
-"""Authentication routes: register, login, refresh, me, email confirmation."""
-import secrets
+"""Authentication routes: register, login, refresh, me, email verification."""
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
 from app.core.audit import record_audit
@@ -17,7 +15,10 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    generate_otp_code,
+    hash_otp_code,
     token_claims,
+    verify_otp_code,
 )
 from app.core.serializers import subscription_dict
 from app.models import AuditAction, Restaurant, Subscription, User, UserRole
@@ -26,6 +27,7 @@ from app.schemas.auth import (
     RegisterRequest,
     UpdateProfileRequest,
     UserOut,
+    VerifyEmailRequest,
 )
 from app.schemas.common import ok
 from app.services import billing, email as email_service
@@ -33,15 +35,23 @@ from app.services import billing, email as email_service
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _new_email_token() -> tuple[str, datetime]:
-    token = secrets.token_urlsafe(32)
-    expires = datetime.utcnow() + timedelta(hours=settings.EMAIL_TOKEN_HOURS)
-    return token, expires
+def _new_otp() -> tuple[str, str, datetime]:
+    """Return (plaintext code, hash to store, expiry). Only the hash is persisted."""
+    code = generate_otp_code()
+    expires = datetime.utcnow() + timedelta(minutes=settings.EMAIL_OTP_MINUTES)
+    return code, hash_otp_code(code), expires
 
 
-async def _send_confirmation(user: User) -> None:
-    confirm_url = f"{settings.PUBLIC_API_URL}/api/auth/confirm?token={user.email_token}"
-    subject, html, text = email_service.confirm_email(user.full_name, confirm_url)
+def _set_otp(user: User) -> str:
+    code, code_hash, expires = _new_otp()
+    user.email_token = code_hash
+    user.email_token_expires = expires
+    user.email_token_attempts = 0
+    return code
+
+
+async def _send_confirmation_code(user: User, code: str) -> None:
+    subject, html, text = email_service.confirm_email_code(user.full_name, code)
     await email_service.send_email(user.email, subject, html, text)
 
 
@@ -80,10 +90,8 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
         restaurant_id=restaurant.id,
     )
     user.set_password(body.password)
-    # Email starts unconfirmed; login is blocked until they click the link.
-    token, expires = _new_email_token()
-    user.email_token = token
-    user.email_token_expires = expires
+    # Email starts unconfirmed; login is blocked until the code is verified.
+    code = _set_otp(user)
     db.add(user)
 
     billing_phone = body.billing_phone or body.phone
@@ -102,18 +110,18 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
     await db.commit()
     await db.refresh(user)
 
-    # Fire the confirmation email (console-logged in dev).
-    await _send_confirmation(user)
+    # Fire the verification code email (console-logged in dev).
+    await _send_confirmation_code(user, code)
 
-    # No login tokens — the account must confirm its email first.
+    # No login tokens — the account must verify its email code first.
     return ok(
         {
             "email": user.email,
             "confirmation_required": True,
         },
         message=(
-            "Almost there — check your email to confirm your account, "
-            "then sign in. Your 14-day free trial is ready."
+            "Almost there — check your email for a verification code, "
+            "then confirm it in the app. Your 14-day free trial is ready."
         ),
     )
 
@@ -153,7 +161,7 @@ async def login(request: Request, body: LoginRequest, db: DbDep):
     # (created via CLI) are exempt.
     if not user.email_confirmed and not user.is_platform_admin:
         raise APIError(
-            "Please confirm your email first. Check your inbox for the link.",
+            "Please verify your email first. Check your inbox for the code.",
             status=403,
             errors={"email_confirmation": "required"},
         )
@@ -189,46 +197,54 @@ async def login(request: Request, body: LoginRequest, db: DbDep):
     )
 
 
-@router.get("/confirm", response_class=HTMLResponse)
-async def confirm_email(token: str, db: DbDep):
-    """Confirm an email via the link token. Returns a simple HTML page since
-    this is opened in a browser, not the app."""
-    result = await db.execute(select(User).where(User.email_token == token))
+@router.post("/verify-email")
+@limiter.limit("10/minute")
+async def verify_email(request: Request, body: VerifyEmailRequest, db: DbDep):
+    """Confirm an email with the 6-digit code sent at signup (or resend).
+
+    Verified in-app rather than via a clicked link. Wrong attempts are counted
+    on the account itself — after EMAIL_OTP_MAX_ATTEMPTS the code is dead
+    regardless of the caller's IP, closing the "just try from another IP"
+    brute-force gap that a pure per-IP rate limit would leave open.
+    """
+    email = body.email.strip().lower()
+    result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
-    def page(title: str, message: str, ok_state: bool) -> str:
-        color = "#005C39" if ok_state else "#C0392B"
-        return f"""<!doctype html><html><head><meta name="viewport"
-        content="width=device-width,initial-scale=1"><title>{title}</title></head>
-        <body style="margin:0;background:#FBFAF6;font-family:Arial,sans-serif;">
-        <div style="max-width:460px;margin:64px auto;padding:32px;text-align:center;">
-        <div style="font-size:24px;font-weight:bold;color:#005C39;">Karibu POS</div>
-        <div style="height:3px;width:44px;background:#F97316;border-radius:2px;margin:12px auto 28px;"></div>
-        <h1 style="font-size:22px;color:{color};">{title}</h1>
-        <p style="color:#3a3a3a;font-size:15px;line-height:1.6;">{message}</p>
-        </div></body></html>"""
+    generic_invalid = APIError(
+        "Invalid or expired code", status=400, errors={"code": "invalid"}
+    )
 
     if not user:
-        return HTMLResponse(
-            page("Link invalid", "This confirmation link is invalid or already used. "
-                 "Try signing in, or request a new link from the app.", False),
-            status_code=400,
-        )
+        raise generic_invalid
     if user.email_confirmed:
-        return HTMLResponse(
-            page("Already confirmed", "Your email is already confirmed — you can "
-                 "sign in from the app.", True)
+        return ok(message="Your email is already confirmed — you can sign in.")
+    if (
+        not user.email_token
+        or not user.email_token_expires
+        or datetime.utcnow() > user.email_token_expires
+    ):
+        raise APIError(
+            "That code has expired. Request a new one.",
+            status=400,
+            errors={"code": "expired"},
         )
-    if user.email_token_expires and datetime.utcnow() > user.email_token_expires:
-        return HTMLResponse(
-            page("Link expired", "This link has expired. Open the app and request "
-                 "a new confirmation email.", False),
-            status_code=400,
+    if user.email_token_attempts >= settings.EMAIL_OTP_MAX_ATTEMPTS:
+        raise APIError(
+            "Too many incorrect attempts. Request a new code.",
+            status=429,
+            errors={"code": "locked"},
         )
+
+    if not verify_otp_code(body.code, user.email_token):
+        user.email_token_attempts += 1
+        await db.commit()
+        raise generic_invalid
 
     user.email_confirmed = True
     user.email_token = None
     user.email_token_expires = None
+    user.email_token_attempts = 0
     await record_audit(
         db,
         action=AuditAction.EMAIL_CONFIRMED,
@@ -236,35 +252,46 @@ async def confirm_email(token: str, db: DbDep):
         actor_id=user.id,
         actor_email=user.email,
         restaurant_id=user.restaurant_id,
+        request=request,
     )
     await db.commit()
-    return HTMLResponse(
-        page("Email confirmed!", "Your account is now active. Head back to the "
-             "Karibu POS app and sign in — your free trial is ready.", True)
+
+    sub_res = await db.execute(
+        select(Subscription).where(Subscription.restaurant_id == user.restaurant_id)
+    )
+    sub = sub_res.scalar_one_or_none()
+
+    # Verifying the code proves email ownership just as signing in would, so
+    # issue a session immediately instead of forcing a separate login step.
+    return ok(
+        {
+            "user": UserOut.model_validate(user).model_dump(),
+            "subscription": subscription_dict(sub) if sub else None,
+            "tokens": _issue_tokens(user),
+        },
+        message="Email confirmed — you're in!",
     )
 
 
 @router.post("/resend-confirmation")
 @limiter.limit("3/minute")
 async def resend_confirmation(request: Request, body: LoginRequest, db: DbDep):
-    """Re-send the confirmation email. Takes email+password so only the account
+    """Re-send the verification code. Takes email+password so only the account
     owner can trigger it (and we don't leak whether an email exists)."""
     email = body.email.strip().lower()
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
     # Always return the same response regardless, to avoid email enumeration.
-    generic = ok(message="If that account exists and is unconfirmed, a new link is on its way.")
+    generic = ok(message="If that account exists and is unconfirmed, a new code is on its way.")
     if not user or not user.check_password(body.password):
         return generic
     if user.email_confirmed:
         return generic
 
-    token, expires = _new_email_token()
-    user.email_token = token
-    user.email_token_expires = expires
+    code = _set_otp(user)
     await db.commit()
-    await _send_confirmation(user)
+    await _send_confirmation_code(user, code)
     return generic
 
 

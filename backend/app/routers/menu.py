@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
+from app.core.cache import cache_delete, cache_get, cache_set
+from app.core.config import settings
 from app.core.dependencies import DbDep, SubscribedUser, require_roles, require_subscription
 from app.core.security import APIError
 from app.core.serializers import menu_item_dict
@@ -15,9 +17,23 @@ router = APIRouter(prefix="/api/menu", tags=["menu"])
 MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
 
 
+def _categories_cache_key(restaurant_id: str) -> str:
+    return f"menu:categories:{restaurant_id}"
+
+
 @router.get("/categories")
 async def list_categories(user: SubscribedUser, db: DbDep):
-    """Categories with available items nested, for the caller's restaurant."""
+    """Categories with available items nested, for the caller's restaurant.
+
+    This is the single most-hit read in the app — every staff member browses
+    it while building every order — so it's cached per-tenant for a short TTL
+    (cache-aside: read through on miss, invalidated on any write below).
+    """
+    cache_key = _categories_cache_key(user.restaurant_id)
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return ok(cached)
+
     result = await db.execute(
         select(Category)
         .where(Category.restaurant_id == user.restaurant_id)
@@ -37,6 +53,7 @@ async def list_categories(user: SubscribedUser, db: DbDep):
                 "items": [menu_item_dict(i) for i in c.items if i.is_available],
             }
         )
+    await cache_set(cache_key, data, settings.CACHE_MENU_TTL_SECONDS)
     return ok(data)
 
 
@@ -84,6 +101,7 @@ async def create_category(
     db.add(cat)
     await db.commit()
     await db.refresh(cat)
+    await cache_delete(_categories_cache_key(user.restaurant_id))
     return ok(
         {
             "id": cat.id,
@@ -113,6 +131,7 @@ async def update_category(
         cat.sort_order = body.sort_order
     await db.commit()
     await db.refresh(cat, attribute_names=["items"])
+    await cache_delete(_categories_cache_key(user.restaurant_id))
     return ok(
         {
             "id": cat.id,
@@ -146,6 +165,7 @@ async def delete_category(
         )
     await db.delete(cat)
     await db.commit()
+    await cache_delete(_categories_cache_key(user.restaurant_id))
     return ok(message="Category deleted")
 
 
@@ -170,6 +190,7 @@ async def create_item(
     db.add(item)
     await db.commit()
     await db.refresh(item, attribute_names=["category"])
+    await cache_delete(_categories_cache_key(user.restaurant_id))
     return ok(menu_item_dict(item), message="Menu item created")
 
 
@@ -201,6 +222,7 @@ async def update_item(
 
     await db.commit()
     await db.refresh(item, attribute_names=["category"])
+    await cache_delete(_categories_cache_key(user.restaurant_id))
     return ok(menu_item_dict(item), message="Menu item updated")
 
 
@@ -214,6 +236,7 @@ async def delete_item(
     item = await _get_scoped_item(db, item_id, user.restaurant_id)
     await db.delete(item)
     await db.commit()
+    await cache_delete(_categories_cache_key(user.restaurant_id))
     return ok(message="Menu item deleted")
 
 

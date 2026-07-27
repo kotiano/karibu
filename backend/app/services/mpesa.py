@@ -87,20 +87,15 @@ async def stk_push(
 ) -> dict:
     """Initiate an STK Push. Returns {checkout_id, merchant_id, simulated}."""
     phone = normalize_phone(phone)
-    amount = max(1, round(amount_cents / 100))  # Daraja needs integer KES, min 1
+    amount = max(1, round(amount_cents / 100))
 
     if not _is_configured():
         fake_id = f"ws_CO_SIM_{int(time.time() * 1000)}"
         return {"checkout_id": fake_id, "merchant_id": "SIM", "simulated": True}
 
-    # Daraja expects the timestamp in East Africa Time (UTC+3), NOT UTC.
-    # Sending UTC puts every request three hours out and Daraja rejects it.
+
     timestamp = (datetime.utcnow() + timedelta(hours=3)).strftime("%Y%m%d%H%M%S")
-    # A till (Buy Goods) and a paybill send different payloads:
-    #   paybill -> TransactionType CustomerPayBillOnline, PartyB = the paybill
-    #   till    -> TransactionType CustomerBuyGoodsOnline, PartyB = the TILL number,
-    #              while BusinessShortCode stays the STORE (head office) number.
-    # The password is always built from BusinessShortCode, so it is correct for both.
+
     is_till = bool(settings.MPESA_TILL_NUMBER)
     payload = {
         "BusinessShortCode": settings.MPESA_SHORTCODE,

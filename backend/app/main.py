@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.core.config import settings
 from app.core.database import Base, engine
@@ -56,6 +57,18 @@ app = FastAPI(
 # --- Rate limiting ----------------------------------------------------------
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- Trust the reverse proxy's forwarded headers -----------------------------
+# Both deployment targets put exactly one trusted proxy directly in front of
+# the app — nginx in docker-compose (the app containers are only `expose`d,
+# never published), or the platform's own edge load balancer on Render/etc.
+# Nothing else can reach the app directly, so trusting the immediate peer's
+# X-Forwarded-For/-Proto is safe. Without this, Gunicorn/Uvicorn never
+# rewrites request.client (it only trusts 127.0.0.1 by default), so it's
+# always the proxy's IP — silently breaking the M-Pesa callback IP allowlist
+# (every real Safaricom callback would 403) and collapsing the per-IP rate
+# limiter into one shared bucket for every caller.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # --- CORS -------------------------------------------------------------------
 app.add_middleware(
@@ -120,6 +133,7 @@ async def security_headers(request: Request, call_next):
     if settings.FORCE_HTTPS:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
 
 # --- Exception handlers → uniform JSON envelope -----------------------------
 @app.exception_handler(APIError)

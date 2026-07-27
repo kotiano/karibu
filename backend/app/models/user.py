@@ -62,11 +62,18 @@ class User(BaseModel):
     email_confirmed: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
+    # Holds a sha256 hash of the active 6-digit verification code (never the
+    # code itself) plus its expiry and how many wrong guesses have been made
+    # against it. `attempts` caps brute-forcing a short numeric code — once it
+    # hits EMAIL_OTP_MAX_ATTEMPTS the code is dead and a fresh one must be sent.
     email_token: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
     )
     email_token_expires: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
+    )
+    email_token_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
     )
 
     orders: Mapped[list["Order"]] = relationship(back_populates="server")

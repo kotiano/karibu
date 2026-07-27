@@ -4,6 +4,8 @@ Tokens embed the same claims as the Flask version: role, branch, rid (tenant),
 tv (token version), plus a `type` of access/refresh so refresh tokens can't be
 used as access tokens.
 """
+import hashlib
+import hmac
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 
@@ -81,3 +83,22 @@ def token_claims(user) -> dict:
         "rid": user.restaurant_id,
         "tv": user.token_version,
     }
+
+
+# --- Email verification codes ------------------------------------------------
+# A 6-digit OTP sent by email at signup, in place of a clickable link — the
+# link required leaving the app for a browser; a code can be typed straight
+# back in. Only ever store/compare the hash: the DB never holds the code
+# itself, and comparison is constant-time so timing can't leak a partial match.
+def generate_otp_code() -> str:
+    return f"{_secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp_code(code: str) -> str:
+    return hashlib.sha256(code.strip().encode()).hexdigest()
+
+
+def verify_otp_code(code: str, code_hash: str | None) -> bool:
+    if not code_hash or not code:
+        return False
+    return hmac.compare_digest(hash_otp_code(code), code_hash)

@@ -19,11 +19,14 @@ from app.models import (
     Payment,
     PaymentMethod,
     PaymentStatus,
+    UserRole,
 )
 from app.schemas.common import ok
 from app.schemas.order import DebtPaymentIn, OrderCreate, OrderPaymentIn, StatusUpdate
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
+
+MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
 
 
 async def _generate_reference(db) -> str:
@@ -91,6 +94,17 @@ async def get_order(order_id: str, user: SubscribedUser, db: DbDep):
 
 @router.post("", status_code=201)
 async def create_order(body: OrderCreate, user: SubscribedUser, db: DbDep):
+    # Discounting is a manager-level action: any staff member can take an
+    # order, but only owner/manager can give away margin. Without this, a
+    # cashier or waiter could zero out an order's total via `discount` and
+    # collect the payment off the books.
+    if body.discount > 0 and user.role not in MANAGERS:
+        raise APIError(
+            "Only a manager or owner can apply a discount",
+            status=403,
+            errors={"discount": "not_permitted"},
+        )
+
     order = Order(
         reference=await _generate_reference(db),
         order_type=body.order_type,
@@ -146,6 +160,26 @@ async def update_status(order_id: str, body: StatusUpdate, user: SubscribedUser,
 async def record_payment(order_id: str, body: OrderPaymentIn, user: SubscribedUser, db: DbDep):
     order = await _get_scoped_order(db, order_id, user.restaurant_id)
     amount_cents = int(round(body.amount * 100))
+
+    # Cap at what's actually left owed — payments AND outstanding debt already
+    # recorded both count, so the two paths can't each be capped against the
+    # full balance independently (which would let an order collect more than
+    # its total). Otherwise staff could key in any amount for cash/M-Pesa/card
+    # (inflating reported revenue) or record a debt far beyond the order total
+    # (a fabricated-liability vector).
+    existing_outstanding_debt = (
+        await db.execute(
+            select(func.coalesce(func.sum(Debt.amount_cents - Debt.paid_cents), 0))
+            .where(Debt.order_id == order.id, Debt.status == DebtStatus.OUTSTANDING)
+        )
+    ).scalar() or 0
+    remaining = order.balance_cents - existing_outstanding_debt
+    if amount_cents > remaining:
+        raise APIError(
+            f"Amount exceeds the balance owed ({max(remaining, 0) / 100:.2f})",
+            status=422,
+            errors={"amount": "exceeds_balance"},
+        )
 
     if body.method == PaymentMethod.DEBT:
         # Credit — recorded as a Debt, NOT a Payment, so it never counts as

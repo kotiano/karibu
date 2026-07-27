@@ -69,6 +69,16 @@ class Settings(BaseSettings):
     RATELIMIT_DEFAULT: str = "200/minute"
     RATELIMIT_LOGIN: str = "5/minute"
 
+    # --- Cache (optional) ------------------------------------------------------
+    # Cache-aside for hot, rarely-changing reads (menu browsing) so a busy
+    # restaurant's ordering traffic doesn't all hit Postgres. Empty disables
+    # caching outright (dev default) — every read just misses and hits the DB,
+    # so nothing behaves differently without Redis configured. Use a separate
+    # logical DB (e.g. /1) from RATELIMIT_STORAGE_URI's so a flush of one never
+    # touches the other.
+    CACHE_URL: str = ""
+    CACHE_MENU_TTL_SECONDS: int = 60
+
     # --- Infra ---------------------------------------------------------------
     FORCE_HTTPS: bool = False
     ENABLE_SCHEDULER: bool = True
@@ -83,10 +93,14 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True  # STARTTLS on 587; set False + port 465 for SSL
     EMAIL_FROM: str = "Karibu POS <no-reply@karibupos.co.ke>"
 
-    # Base URL the confirmation link points at (the API's public URL).
+    # Base URL of the API (used for links in outgoing emails).
     PUBLIC_API_URL: str = "http://localhost:8000"
-    # How long an email-confirmation token stays valid.
-    EMAIL_TOKEN_HOURS: int = 48
+    # How long a signup email-verification code stays valid, and how many
+    # wrong guesses are allowed before it's invalidated and must be resent.
+    # Short + attempt-capped because, unlike the old link token, a 6-digit
+    # code is guessable — it must not stay valid long enough to brute force.
+    EMAIL_OTP_MINUTES: int = 15
+    EMAIL_OTP_MAX_ATTEMPTS: int = 5
 
     # Postgres connection pool (ignored on SQLite).
     DB_POOL_SIZE: int = 10

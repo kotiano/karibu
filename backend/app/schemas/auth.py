@@ -23,6 +23,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
 class UpdateProfileRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=120)
     phone: str | None = None

@@ -32,9 +32,11 @@ EXPOSE 8000
 # workers handle the outbound M-Pesa calls without blocking.
 # NOTE: with more than one instance, run the scheduler separately and set
 # ENABLE_SCHEDULER=false here, or the billing sweep fires once per instance.
+# WEB_CONCURRENCY tunes worker count per container to the host's CPU count
+# (a common rule of thumb is 2x cores + 1) without rebuilding the image.
 CMD alembic upgrade head && \
     gunicorn app.main:app \
       --worker-class uvicorn.workers.UvicornWorker \
-      --workers 2 \
+      --workers ${WEB_CONCURRENCY:-2} \
       --bind 0.0.0.0:${PORT:-8000} \
       --timeout 60

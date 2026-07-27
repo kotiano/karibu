@@ -18,10 +18,10 @@ logger = logging.getLogger("karibu.audit")
 def _client_ip(request: Request | None) -> str | None:
     if not request:
         return None
-    # X-Forwarded-For (set by Nginx) wins; fall back to the socket peer.
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    # ProxyHeadersMiddleware (added in main.py) already rewrites request.client
+    # from X-Forwarded-For for the one trusted proxy hop in front of the app.
+    # Reading the header directly here instead would let a caller spoof the
+    # logged IP on any deployment where that trust boundary doesn't hold.
     return request.client.host if request.client else None
 
 

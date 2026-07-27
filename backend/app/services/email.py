@@ -86,23 +86,26 @@ def _button(url: str, label: str) -> str:
 
 
 # --- Templates --------------------------------------------------------------
-def confirm_email(full_name: str, confirm_url: str) -> tuple[str, str, str]:
-    subject = "Confirm your email · Karibu POS"
+def confirm_email_code(full_name: str, code: str) -> tuple[str, str, str]:
+    subject = "Your Karibu POS verification code"
     html = _wrap(
         "Confirm your email",
         f"""<p style="color:#3a3a3a;font-size:15px;line-height:1.6;">
-        Hi {full_name}, welcome to Karibu POS! Please confirm this email address
-        to activate your account.</p>
-        <p style="margin:24px 0;">{_button(confirm_url, "Confirm email")}</p>
+        Hi {full_name}, welcome to Karibu POS! Enter this code in the app to
+        confirm your email address and activate your account.</p>
+        <p style="margin:24px 0;font-size:32px;font-weight:bold;letter-spacing:8px;
+        background:#F4F2EC;padding:16px 20px;border-radius:8px;text-align:center;">
+        {code}</p>
         <p style="color:#8a8a8a;font-size:13px;line-height:1.6;">
-        This link expires in {settings.EMAIL_TOKEN_HOURS} hours. If you didn't
+        This code expires in {settings.EMAIL_OTP_MINUTES} minutes. If you didn't
         create a Karibu POS account, you can ignore this email.</p>""",
     )
     text = (
         f"Hi {full_name}, welcome to Karibu POS!\n\n"
-        f"Confirm your email to activate your account:\n{confirm_url}\n\n"
-        f"This link expires in {settings.EMAIL_TOKEN_HOURS} hours. "
-        f"If you didn't sign up, ignore this email."
+        f"Your verification code is: {code}\n\n"
+        f"Enter it in the app to activate your account. This code expires in "
+        f"{settings.EMAIL_OTP_MINUTES} minutes. If you didn't sign up, ignore "
+        f"this email."
     )
     return subject, html, text
 
