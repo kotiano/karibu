@@ -1,4 +1,5 @@
 """Authentication routes: register, login, refresh, me, email verification."""
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -53,9 +54,24 @@ def _set_otp(user: User) -> str:
 
 
 async def _send_confirmation_code(user: User, code: str) -> bool:
-    """Email the code. Returns whether it was actually delivered to SMTP."""
+    """Email the code, bounded by EMAIL_SIGNUP_DEADLINE_SECONDS.
+
+    Returns whether it was actually delivered. A blocked or slow mail server
+    must never hold the signup response longer than a mobile client will wait.
+    """
     subject, html, text = email_service.confirm_email_code(user.full_name, code)
-    sent = await email_service.send_email(user.email, subject, html, text)
+    try:
+        sent = await asyncio.wait_for(
+            email_service.send_email(user.email, subject, html, text),
+            timeout=settings.EMAIL_SIGNUP_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        sent = False
+        logger.error(
+            "Email to %s exceeded the %ss signup deadline — returning to the "
+            "client without waiting. Check the mail transport.",
+            user.email, settings.EMAIL_SIGNUP_DEADLINE_SECONDS,
+        )
     if not sent:
         logger.error(
             "Verification code for %s could not be emailed — the account "
@@ -83,8 +99,36 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
     if problem:
         raise APIError(problem, status=422, errors={"password": problem})
 
-    exists = await db.execute(select(User).where(User.email == email))
-    if exists.scalar_one_or_none():
+    result = await db.execute(select(User).where(User.email == email))
+    existing = result.scalar_one_or_none()
+    if existing:
+        # A still-unconfirmed account whose owner can produce the password is
+        # almost always a RETRY of a signup whose response never reached the
+        # client — the account was committed, then the reply was lost (slow
+        # email send, flaky mobile connection). Hard-409ing that leaves the
+        # user wedged: they can't log in (unconfirmed) and can't re-register
+        # (409), with no hint that /resend-confirmation is the way out. Treat
+        # it as a resend instead, which makes signup safely idempotent.
+        if not existing.email_confirmed and existing.check_password(body.password):
+            code = _set_otp(existing)
+            await db.commit()
+            sent = await _send_confirmation_code(existing, code)
+            return ok(
+                {
+                    "email": existing.email,
+                    "confirmation_required": True,
+                    "email_sent": sent,
+                },
+                message=(
+                    "You already started signing up — we've sent a fresh "
+                    "verification code to your email."
+                )
+                if sent
+                else (
+                    "You already started signing up, but we couldn't send the "
+                    "verification email just now. Tap resend in a moment."
+                ),
+            )
         raise APIError("An account with this email already exists", status=409)
 
     restaurant = Restaurant(name=body.restaurant_name.strip())

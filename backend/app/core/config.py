@@ -122,6 +122,13 @@ class Settings(BaseSettings):
     # mail host must not turn into a killed worker. Defaults worst-case ~21s.
     SMTP_TIMEOUT_SECONDS: int = 10
     EMAIL_SEND_RETRIES: int = 1
+    # Hard ceiling on how long a signup request may wait for the email to go
+    # out. Retries can otherwise stack up to (retries+1)*timeout, and a mobile
+    # client gives up long before that — leaving the account committed but the
+    # user staring at "unable to reach server", then blocked by a 409 when they
+    # retry. Past this deadline we stop waiting and report email_sent=false;
+    # the code is already saved, so /resend-confirmation still recovers it.
+    EMAIL_SIGNUP_DEADLINE_SECONDS: int = 12
 
     # Base URL of the API (used for links in outgoing emails).
     PUBLIC_API_URL: str = "http://localhost:8000"
