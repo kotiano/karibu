@@ -1,4 +1,5 @@
 """Authentication routes: register, login, refresh, me, email verification."""
+import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Request
@@ -33,6 +34,7 @@ from app.schemas.common import ok
 from app.services import billing, email as email_service
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger("karibu.auth")
 
 
 def _new_otp() -> tuple[str, str, datetime]:
@@ -50,9 +52,17 @@ def _set_otp(user: User) -> str:
     return code
 
 
-async def _send_confirmation_code(user: User, code: str) -> None:
+async def _send_confirmation_code(user: User, code: str) -> bool:
+    """Email the code. Returns whether it was actually delivered to SMTP."""
     subject, html, text = email_service.confirm_email_code(user.full_name, code)
-    await email_service.send_email(user.email, subject, html, text)
+    sent = await email_service.send_email(user.email, subject, html, text)
+    if not sent:
+        logger.error(
+            "Verification code for %s could not be emailed — the account "
+            "cannot log in until a code is delivered (POST /auth/resend-confirmation)",
+            user.email,
+        )
+    return sent
 
 
 def _issue_tokens(user: User) -> dict:
@@ -111,17 +121,27 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
     await db.refresh(user)
 
     # Fire the verification code email (console-logged in dev).
-    await _send_confirmation_code(user, code)
+    sent = await _send_confirmation_code(user, code)
 
     # No login tokens — the account must verify its email code first.
+    # `email_sent` lets the client tell "check your inbox" apart from "we
+    # couldn't send it", instead of stranding the user on a screen waiting for
+    # a code that is never coming. The account and its code are already
+    # committed, so /auth/resend-confirmation recovers it once mail is healthy.
     return ok(
         {
             "email": user.email,
             "confirmation_required": True,
+            "email_sent": sent,
         },
         message=(
             "Almost there — check your email for a verification code, "
             "then confirm it in the app. Your 14-day free trial is ready."
+        )
+        if sent
+        else (
+            "Your account is ready, but we couldn't send the verification "
+            "email just now. Tap resend in a moment to get your code."
         ),
     )
 

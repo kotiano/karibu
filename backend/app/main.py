@@ -176,7 +176,14 @@ async def handle_unexpected(request: Request, exc: Exception):
 # --- Health -----------------------------------------------------------------
 @app.get("/api/health", tags=["health"])
 async def health():
-    return {"success": True, "message": "Karibu POS API is running", "data": {"status": "ok"}}
+    # `email` reports only whether SMTP is wired up (never host/user/password),
+    # so a post-deploy curl can confirm signup codes will actually be mailed
+    # rather than silently console-logged.
+    return {
+        "success": True,
+        "message": "Karibu POS API is running",
+        "data": {"status": "ok", "email": settings.email_configured},
+    }
 
 
 # --- Routers ----------------------------------------------------------------

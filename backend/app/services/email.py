@@ -29,36 +29,81 @@ def _send_sync(to: str, subject: str, html: str, text: str) -> None:
     msg.attach(MIMEText(text, "plain"))
     msg.attach(MIMEText(html, "html"))
 
+    timeout = settings.SMTP_TIMEOUT_SECONDS
     if settings.SMTP_USE_TLS:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as server:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
             server.starttls()
             if settings.SMTP_USER:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
     else:
-        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as server:
+        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
             if settings.SMTP_USER:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
 
 
-async def send_email(to: str, subject: str, html: str, text: str) -> bool:
-    """Send an email. Returns True if sent (or logged in dev), False on error.
+def _is_permanent(exc: Exception) -> bool:
+    """True for failures that retrying cannot fix (bad credentials, rejected
+    sender/recipient). Retrying those just delays the caller for nothing."""
+    return isinstance(
+        exc,
+        (
+            smtplib.SMTPAuthenticationError,
+            smtplib.SMTPSenderRefused,
+            smtplib.SMTPRecipientsRefused,
+            smtplib.SMTPNotSupportedError,
+        ),
+    )
 
-    Never raises — email failures shouldn't break the calling request.
+
+async def send_email(to: str, subject: str, html: str, text: str) -> bool:
+    """Send an email. Returns True if it was sent, False if it was not.
+
+    Never raises — email failures shouldn't break the calling request. Callers
+    that depend on delivery (signup codes) must check the return value.
+
+    Transient failures are retried EMAIL_SEND_RETRIES times with a short
+    backoff; authentication and rejected-address errors are permanent and fail
+    immediately.
     """
     if not settings.email_configured:
-        logger.info(
-            "[email:console] To=%s | Subject=%s\n%s", to, subject, text
-        )
+        # No SMTP: log the message instead so development needs zero setup.
+        # This path is unreachable in production — assert_production_ready()
+        # refuses to boot without SMTP_HOST — but if it is ever reached there,
+        # report failure rather than claiming a delivery that never happened.
+        if settings.ENV == "production":
+            logger.error(
+                "SMTP is not configured in production — refusing to pretend "
+                "the email to %s was delivered (subject=%s)", to, subject,
+            )
+            return False
+        logger.info("[email:console] To=%s | Subject=%s\n%s", to, subject, text)
         return True
-    try:
-        await asyncio.to_thread(_send_sync, to, subject, html, text)
-        logger.info("Email sent to %s (%s)", to, subject)
-        return True
-    except Exception:
-        logger.exception("Failed to send email to %s", to)
-        return False
+
+    attempts = max(1, settings.EMAIL_SEND_RETRIES + 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            await asyncio.to_thread(_send_sync, to, subject, html, text)
+            logger.info("Email sent to %s (%s)", to, subject)
+            return True
+        except Exception as exc:
+            permanent = _is_permanent(exc)
+            last = attempt == attempts
+            logger.warning(
+                "Email send to %s failed (attempt %d/%d, %s): %s",
+                to, attempt, attempts,
+                "permanent" if permanent else "transient",
+                exc,
+            )
+            if permanent or last:
+                logger.error(
+                    "Giving up sending email to %s (subject=%s)", to, subject,
+                    exc_info=exc,
+                )
+                return False
+            await asyncio.sleep(2 ** (attempt - 1))
+    return False
 
 
 # --- Shared HTML shell ------------------------------------------------------

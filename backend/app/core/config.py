@@ -91,7 +91,18 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_USE_TLS: bool = True  # STARTTLS on 587; set False + port 465 for SSL
-    EMAIL_FROM: str = "Karibu POS <no-reply@karibupos.co.ke>"
+    # Gmail rewrites From to the authenticated mailbox, so this address must
+    # match SMTP_USER (or a verified "Send mail as" alias on that account) or
+    # the send is refused.
+    EMAIL_FROM: str = "Karibu POS <karibupos@gmail.com>"
+    # Socket timeout per send attempt, and how many times to retry a failed
+    # send. A signup code that fails to send locks the user out of their brand
+    # new account, so one transient blip is worth retrying before giving up.
+    # Keep (retries + 1) * timeout + backoff comfortably under Gunicorn's
+    # --timeout (60s): the signup send runs inline in the request, so a slow
+    # mail host must not turn into a killed worker. Defaults worst-case ~21s.
+    SMTP_TIMEOUT_SECONDS: int = 10
+    EMAIL_SEND_RETRIES: int = 1
 
     # Base URL of the API (used for links in outgoing emails).
     PUBLIC_API_URL: str = "http://localhost:8000"
@@ -131,6 +142,39 @@ class Settings(BaseSettings):
             problems.append("CORS_ORIGINS is '*' (set your app's real origins)")
         if self.ALLOWED_HOSTS.strip() == "*":
             problems.append("ALLOWED_HOSTS is '*' (set your API hostname)")
+        # Without SMTP the app silently falls back to console-logging signup
+        # codes. In dev that's a convenience; in production it means every new
+        # owner is permanently locked out of the account they just created,
+        # with nothing in the API response to say so. Fail the boot instead.
+        if not self.SMTP_HOST.strip():
+            problems.append(
+                "SMTP_HOST is empty — signup verification codes would only be "
+                "logged to the console, locking every new user out. Configure "
+                "SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/EMAIL_FROM."
+            )
+        elif not self.SMTP_USER.strip() or not self.SMTP_PASSWORD.strip():
+            # Every hosted provider (Gmail, Zoho, Mailgun, Brevo, SendGrid)
+            # requires auth; an unauthenticated relay here is almost always a
+            # half-finished config that fails on the first real send.
+            problems.append(
+                "SMTP_HOST is set but SMTP_USER/SMTP_PASSWORD are empty "
+                "(hosted mail providers all require authentication)"
+            )
+        if "@" not in self.EMAIL_FROM:
+            problems.append("EMAIL_FROM is not a valid sender address")
+        # Gmail refuses to send as an address the authenticated account doesn't
+        # own, so a mismatch here fails on the first real send rather than at
+        # boot — catch it now, while the log is still being read.
+        elif (
+            "gmail.com" in self.SMTP_HOST.lower()
+            and self.SMTP_USER.strip()
+            and self.email_from_address.lower() != self.SMTP_USER.strip().lower()
+        ):
+            problems.append(
+                f"EMAIL_FROM ({self.email_from_address}) must match SMTP_USER "
+                f"({self.SMTP_USER}) for Gmail, or be an alias verified on that "
+                f"account under Settings -> Accounts -> 'Send mail as'"
+            )
         if problems:
             raise RuntimeError(
                 "Refusing to start in production with insecure config:\n  - "
@@ -156,6 +200,14 @@ class Settings(BaseSettings):
     @property
     def email_configured(self) -> bool:
         return bool(self.SMTP_HOST)
+
+    @property
+    def email_from_address(self) -> str:
+        """The bare address out of EMAIL_FROM ("Name <a@b.c>" -> "a@b.c")."""
+        value = self.EMAIL_FROM.strip()
+        if "<" in value and ">" in value:
+            return value[value.rindex("<") + 1 : value.rindex(">")].strip()
+        return value
 
     @field_validator("DATABASE_URL")
     @classmethod

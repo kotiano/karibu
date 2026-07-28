@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/jude/Downloads/karibu-pos-COMPLETE/karibu-pos/**)",
+      "Bash(.venv/bin/python -m compileall -q app send_test_email.py)",
+      "Bash(cd /home/jude/Downloads/karibu-pos-COMPLETE/karibu-pos && grep -n \"mpesa/callback\" RENDER.md DEPLOYMENT.md)"
+    ],
+    "additionalDirectories": [
+      "/home/jude/Downloads/karibu-pos-COMPLETE/karibu-pos"
+    ]
+  }
+}
