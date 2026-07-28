@@ -1,24 +1,129 @@
-"""Email sending (SMTP) with a console fallback.
+"""Email sending with a console fallback.
 
-- If SMTP isn't configured, emails are logged to the console instead of sent,
-  so development needs zero setup and nothing silently fails.
-- smtplib is blocking, so the actual send runs in a thread via asyncio.to_thread
-  to keep the event loop free.
-- Templates are plain functions returning (subject, html, text). Keep them
-  simple and inline — no template engine dependency.
+Two transports, selected by EMAIL_PROVIDER:
 
-Provider-agnostic: works with Gmail, Zoho, Mailgun SMTP, etc. via the SMTP_*
-settings.
+- "smtp" (default) — any SMTP host via the SMTP_* settings (Gmail, Zoho,
+  Mailgun…). smtplib is blocking, so the send runs in a thread via
+  asyncio.to_thread to keep the event loop free.
+- "brevo" / "resend" / "sendgrid" — the provider's HTTPS API via httpx. Use
+  these where outbound SMTP is firewalled: Render's free tier and most PaaS
+  free tiers block ports 25/465/587, so smtplib fails with "[Errno 101]
+  Network is unreachable" regardless of credentials. Port 443 is always open.
+
+If neither is configured, emails are logged to the console instead of sent, so
+development needs zero setup and nothing silently fails.
+
+Templates are plain functions returning (subject, html, text). Keep them simple
+and inline — no template engine dependency.
 """
 import asyncio
 import logging
 import smtplib
+import socket
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+import httpx
 
 from app.core.config import settings
 
 logger = logging.getLogger("karibu.email")
+
+
+def _connect(host: str, port: int, timeout: int, source_address=None) -> socket.socket:
+    """Open a TCP socket, trying IPv4 before IPv6 and logging every attempt.
+
+    socket.create_connection tries the addresses getaddrinfo returns, but on
+    failure re-raises only exceptions[0] — so when a host has both A and AAAA
+    records you see one error and the others vanish. That matters here: many
+    container platforms have no IPv6 route, which surfaces as ENETUNREACH
+    ("Network is unreachable") from the IPv6 attempt and can mask what actually
+    happened on IPv4. Ordering IPv4 first avoids that dead end entirely, and
+    logging each address makes a real egress block distinguishable from a
+    routing quirk.
+    """
+    infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    # IPv4 first; getaddrinfo's RFC 6724 ordering often puts IPv6 ahead.
+    infos.sort(key=lambda i: 0 if i[0] == socket.AF_INET else 1)
+
+    errors: list[str] = []
+    for family, socktype, proto, _canon, sa in infos:
+        label = f"{'IPv4' if family == socket.AF_INET else 'IPv6'} {sa[0]}:{sa[1]}"
+        sock = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            logger.debug("SMTP connected via %s", label)
+            return sock
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            errors.append(f"{label} -> {exc.__class__.__name__}: {exc}")
+            logger.warning("SMTP connect failed: %s", errors[-1])
+
+    raise OSError(
+        f"could not reach {host}:{port} on any address. Tried: "
+        + "; ".join(errors)
+        + ". If every attempt says 'Network is unreachable' or times out, "
+        "outbound SMTP is blocked by the host (common on PaaS free tiers) — "
+        "no SMTP setting will fix it; send over an HTTPS API instead "
+        "(EMAIL_PROVIDER=brevo/resend/sendgrid)."
+    )
+
+
+class _IPv4FirstSMTP(smtplib.SMTP):
+    def _get_socket(self, host, port, timeout):
+        return _connect(host, port, timeout, self.source_address)
+
+
+class _IPv4FirstSMTP_SSL(smtplib.SMTP_SSL):
+    def _get_socket(self, host, port, timeout):
+        sock = _connect(host, port, timeout, self.source_address)
+        # self._host stays the hostname, so cert validation still checks the
+        # name rather than the resolved IP.
+        return self.context.wrap_socket(sock, server_hostname=self._host)
+
+
+def diagnose_smtp() -> None:
+    """Log a verdict on whether this host can reach the configured SMTP server.
+
+    Runs at boot when EMAIL_DIAGNOSE_ON_BOOT=true, so the answer shows up in
+    the platform's log viewer — the only diagnostic channel available when
+    there's no shell access (Render's shell is paid-only).
+    """
+    host, port = settings.SMTP_HOST, settings.SMTP_PORT
+    if not host:
+        logger.info("[smtp-diagnose] SMTP_HOST is empty — nothing to test")
+        return
+    logger.info("[smtp-diagnose] testing TCP reachability of %s:%s", host, port)
+    try:
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except OSError as exc:
+        logger.error("[smtp-diagnose] DNS FAILED for %s: %s", host, exc)
+        return
+    logger.info(
+        "[smtp-diagnose] resolves to: %s",
+        ", ".join(
+            f"{'IPv4' if f == socket.AF_INET else 'IPv6'} {sa[0]}"
+            for f, _, _, _, sa in infos
+        ),
+    )
+    try:
+        sock = _connect(host, port, min(settings.SMTP_TIMEOUT_SECONDS, 10))
+        sock.close()
+        logger.info(
+            "[smtp-diagnose] SUCCESS — outbound SMTP to %s:%s works from this "
+            "host. If sends still fail it's credentials, not the network.",
+            host, port,
+        )
+    except OSError as exc:
+        logger.error(
+            "[smtp-diagnose] BLOCKED — cannot open a TCP connection to %s:%s. "
+            "%s", host, port, exc,
+        )
 
 
 def _send_sync(to: str, subject: str, html: str, text: str) -> None:
@@ -31,16 +136,101 @@ def _send_sync(to: str, subject: str, html: str, text: str) -> None:
 
     timeout = settings.SMTP_TIMEOUT_SECONDS
     if settings.SMTP_USE_TLS:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
+        with _IPv4FirstSMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
             server.starttls()
             if settings.SMTP_USER:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
     else:
-        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
+        with _IPv4FirstSMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
             if settings.SMTP_USER:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
+
+
+# --- HTTPS API transports ---------------------------------------------------
+# Used where outbound SMTP is firewalled (Render's free tier and most PaaS free
+# tiers block 25/465/587). Port 443 is always open, so these work when smtplib
+# cannot connect at all. Each returns (url, headers, json_body) for httpx.
+def _brevo_request(to: str, subject: str, html: str, text: str) -> tuple:
+    return (
+        "https://api.brevo.com/v3/smtp/email",
+        {"api-key": settings.EMAIL_API_KEY, "accept": "application/json"},
+        {
+            "sender": {
+                "name": settings.email_from_name,
+                "email": settings.email_from_address,
+            },
+            "to": [{"email": to}],
+            "subject": subject,
+            "htmlContent": html,
+            "textContent": text,
+        },
+    )
+
+
+def _resend_request(to: str, subject: str, html: str, text: str) -> tuple:
+    return (
+        "https://api.resend.com/emails",
+        {"Authorization": f"Bearer {settings.EMAIL_API_KEY}"},
+        {
+            "from": settings.EMAIL_FROM,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+            "text": text,
+        },
+    )
+
+
+def _sendgrid_request(to: str, subject: str, html: str, text: str) -> tuple:
+    return (
+        "https://api.sendgrid.com/v3/mail/send",
+        {"Authorization": f"Bearer {settings.EMAIL_API_KEY}"},
+        {
+            "personalizations": [{"to": [{"email": to}]}],
+            "from": {
+                "email": settings.email_from_address,
+                "name": settings.email_from_name,
+            },
+            "subject": subject,
+            "content": [
+                {"type": "text/plain", "value": text},
+                {"type": "text/html", "value": html},
+            ],
+        },
+    )
+
+
+_API_BUILDERS = {
+    "brevo": _brevo_request,
+    "resend": _resend_request,
+    "sendgrid": _sendgrid_request,
+}
+
+
+class PermanentEmailError(Exception):
+    """A provider rejection that retrying cannot fix (bad key, bad sender)."""
+
+
+async def _send_via_api(to: str, subject: str, html: str, text: str) -> None:
+    provider = settings.EMAIL_PROVIDER.strip().lower()
+    url, headers, payload = _API_BUILDERS[provider](to, subject, html, text)
+
+    async with httpx.AsyncClient(timeout=settings.SMTP_TIMEOUT_SECONDS) as client:
+        response = await client.post(url, headers=headers, json=payload)
+
+    if response.status_code < 300:
+        return
+    detail = response.text[:400]
+    # 4xx (other than rate limiting) means the request itself is wrong — a bad
+    # API key, or a sender address the account hasn't verified. Retrying an
+    # identical request just delays the caller for nothing.
+    if 400 <= response.status_code < 500 and response.status_code != 429:
+        raise PermanentEmailError(
+            f"{provider} rejected the send: HTTP {response.status_code} {detail}"
+        )
+    raise RuntimeError(f"{provider} send failed: HTTP {response.status_code} {detail}")
 
 
 def _is_permanent(exc: Exception) -> bool:
@@ -49,6 +239,7 @@ def _is_permanent(exc: Exception) -> bool:
     return isinstance(
         exc,
         (
+            PermanentEmailError,
             smtplib.SMTPAuthenticationError,
             smtplib.SMTPSenderRefused,
             smtplib.SMTPRecipientsRefused,
@@ -68,24 +259,32 @@ async def send_email(to: str, subject: str, html: str, text: str) -> bool:
     immediately.
     """
     if not settings.email_configured:
-        # No SMTP: log the message instead so development needs zero setup.
-        # This path is unreachable in production — assert_production_ready()
-        # refuses to boot without SMTP_HOST — but if it is ever reached there,
-        # report failure rather than claiming a delivery that never happened.
+        # No transport: log the message instead so development needs zero
+        # setup. This path is unreachable in production — assert_production_
+        # ready() refuses to boot without one — but if it is ever reached
+        # there, report failure rather than claiming a delivery that never
+        # happened.
         if settings.ENV == "production":
             logger.error(
-                "SMTP is not configured in production — refusing to pretend "
-                "the email to %s was delivered (subject=%s)", to, subject,
+                "No email transport configured in production — refusing to "
+                "pretend the email to %s was delivered (subject=%s)", to, subject,
             )
             return False
         logger.info("[email:console] To=%s | Subject=%s\n%s", to, subject, text)
         return True
 
+    via_api = settings.uses_email_api
     attempts = max(1, settings.EMAIL_SEND_RETRIES + 1)
     for attempt in range(1, attempts + 1):
         try:
-            await asyncio.to_thread(_send_sync, to, subject, html, text)
-            logger.info("Email sent to %s (%s)", to, subject)
+            if via_api:
+                await _send_via_api(to, subject, html, text)
+            else:
+                await asyncio.to_thread(_send_sync, to, subject, html, text)
+            logger.info(
+                "Email sent to %s (%s) via %s",
+                to, subject, settings.EMAIL_PROVIDER if via_api else "smtp",
+            )
             return True
         except Exception as exc:
             permanent = _is_permanent(exc)

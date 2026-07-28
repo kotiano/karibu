@@ -83,7 +83,26 @@ class Settings(BaseSettings):
     FORCE_HTTPS: bool = False
     ENABLE_SCHEDULER: bool = True
 
-    # --- Email (SMTP) --------------------------------------------------------
+    # --- Email ---------------------------------------------------------------
+    # Two transports. Pick with EMAIL_PROVIDER:
+    #
+    #   "smtp"  — classic SMTP (default). Works on a VPS, Docker, locally.
+    #   "brevo" / "resend" / "sendgrid" — the provider's HTTPS API.
+    #
+    # Use an HTTP provider when the host blocks outbound SMTP: Render's free
+    # tier (and many PaaS free tiers) firewall ports 25/465/587 to curb spam,
+    # so smtplib fails with "[Errno 101] Network is unreachable" no matter how
+    # correct the credentials are. Port 443 is always open, so the API works
+    # where SMTP cannot. Set EMAIL_API_KEY when using one of these.
+    EMAIL_PROVIDER: str = "smtp"
+    EMAIL_API_KEY: str = ""
+
+    # Log an SMTP reachability verdict at startup. Set true to find out whether
+    # a host actually permits outbound SMTP when you have no shell to test from
+    # (Render's shell is paid-only) — the result lands in the platform's log
+    # viewer. Leave off normally; it adds a few seconds to boot.
+    EMAIL_DIAGNOSE_ON_BOOT: bool = False
+
     # If SMTP_HOST is empty, emails are printed to the console instead of sent
     # (zero-setup dev). Set these for real delivery (Gmail/Zoho/any host).
     SMTP_HOST: str = ""
@@ -142,15 +161,31 @@ class Settings(BaseSettings):
             problems.append("CORS_ORIGINS is '*' (set your app's real origins)")
         if self.ALLOWED_HOSTS.strip() == "*":
             problems.append("ALLOWED_HOSTS is '*' (set your API hostname)")
-        # Without SMTP the app silently falls back to console-logging signup
-        # codes. In dev that's a convenience; in production it means every new
-        # owner is permanently locked out of the account they just created,
-        # with nothing in the API response to say so. Fail the boot instead.
-        if not self.SMTP_HOST.strip():
+        provider = self.EMAIL_PROVIDER.strip().lower()
+        if provider not in {"smtp", "brevo", "resend", "sendgrid"}:
+            problems.append(
+                f"EMAIL_PROVIDER '{self.EMAIL_PROVIDER}' is not recognised "
+                f"(use smtp, brevo, resend or sendgrid)"
+            )
+        # Without a working transport the app silently falls back to
+        # console-logging signup codes. In dev that's a convenience; in
+        # production it means every new owner is permanently locked out of the
+        # account they just created, with nothing in the API response to say
+        # so. Fail the boot instead.
+        elif self.uses_email_api:
+            if not self.EMAIL_API_KEY.strip():
+                problems.append(
+                    f"EMAIL_PROVIDER is '{provider}' but EMAIL_API_KEY is empty "
+                    f"— signup verification codes would only be logged to the "
+                    f"console, locking every new user out."
+                )
+        elif not self.SMTP_HOST.strip():
             problems.append(
                 "SMTP_HOST is empty — signup verification codes would only be "
                 "logged to the console, locking every new user out. Configure "
-                "SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/EMAIL_FROM."
+                "SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/EMAIL_FROM, or "
+                "set EMAIL_PROVIDER + EMAIL_API_KEY to send over HTTPS instead "
+                "(required where outbound SMTP is blocked)."
             )
         elif not self.SMTP_USER.strip() or not self.SMTP_PASSWORD.strip():
             # Every hosted provider (Gmail, Zoho, Mailgun, Brevo, SendGrid)
@@ -166,7 +201,8 @@ class Settings(BaseSettings):
         # own, so a mismatch here fails on the first real send rather than at
         # boot — catch it now, while the log is still being read.
         elif (
-            "gmail.com" in self.SMTP_HOST.lower()
+            not self.uses_email_api
+            and "gmail.com" in self.SMTP_HOST.lower()
             and self.SMTP_USER.strip()
             and self.email_from_address.lower() != self.SMTP_USER.strip().lower()
         ):
@@ -198,7 +234,14 @@ class Settings(BaseSettings):
         return self.DATABASE_URL.startswith("sqlite")
 
     @property
+    def uses_email_api(self) -> bool:
+        """True when sending over a provider's HTTPS API instead of SMTP."""
+        return self.EMAIL_PROVIDER.strip().lower() in {"brevo", "resend", "sendgrid"}
+
+    @property
     def email_configured(self) -> bool:
+        if self.uses_email_api:
+            return bool(self.EMAIL_API_KEY.strip())
         return bool(self.SMTP_HOST)
 
     @property
@@ -208,6 +251,14 @@ class Settings(BaseSettings):
         if "<" in value and ">" in value:
             return value[value.rindex("<") + 1 : value.rindex(">")].strip()
         return value
+
+    @property
+    def email_from_name(self) -> str:
+        """The display name out of EMAIL_FROM ("Name <a@b.c>" -> "Name")."""
+        value = self.EMAIL_FROM.strip()
+        if "<" in value:
+            return value[: value.index("<")].strip().strip('"') or "Karibu POS"
+        return "Karibu POS"
 
     @field_validator("DATABASE_URL")
     @classmethod

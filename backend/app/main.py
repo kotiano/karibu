@@ -4,6 +4,7 @@ Assembles the app the way the Flask factory did: exception handlers that emit th
 same JSON envelope, CORS, security headers, rate limiting, the background billing
 scheduler (in the lifespan), and all routers. Interactive docs at /docs.
 """
+import asyncio
 import contextlib
 import logging
 import os
@@ -33,6 +34,13 @@ async def lifespan(app: FastAPI):
     # Fail fast if we're in production with placeholder secrets — refusing to
     # boot beats booting exploitable.
     settings.assert_production_ready()
+
+    # Opt-in network probe: answers "can this host reach the SMTP server at
+    # all?" in the logs, for deployments with no shell to test from.
+    if settings.EMAIL_DIAGNOSE_ON_BOOT and not settings.uses_email_api:
+        from app.services.email import diagnose_smtp
+
+        await asyncio.to_thread(diagnose_smtp)
 
     # Dev convenience: create tables if they don't exist. In production use
     # Alembic migrations instead.
