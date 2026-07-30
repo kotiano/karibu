@@ -194,6 +194,30 @@ async def health():
     }
 
 
+# --- Legal pages (public, unauthenticated) ----------------------------------
+# Google Play requires a publicly reachable privacy policy URL — the in-app
+# Legal screen doesn't satisfy it, because reviewers and the store listing both
+# link to it. These files are generated from the app's src/content/legal.ts (the
+# same source the in-app screen renders, so the two can't drift) by
+# `npm run build:legal:api` in the frontend repo. Never hand-edit them.
+#
+# Mounted rather than routed so the whole directory is served with correct
+# content types and caching. It sits OUTSIDE /api deliberately: no auth, no
+# subscription gate, and a URL a non-technical reader can be given.
+_LEGAL_DIR = os.path.join(os.path.dirname(__file__), "static", "legal")
+if os.path.isdir(_LEGAL_DIR):
+    from fastapi.staticfiles import StaticFiles
+
+    # html=True makes /legal/ serve index.html, so the bare path isn't a 404.
+    app.mount("/legal", StaticFiles(directory=_LEGAL_DIR, html=True), name="legal")
+else:  # pragma: no cover - only hit if the generator was never run
+    logger.warning(
+        "No legal pages at %s — run `npm run build:legal:api` in the frontend "
+        "repo. The Play Store listing's privacy policy URL will 404 without them.",
+        _LEGAL_DIR,
+    )
+
+
 # --- Routers ----------------------------------------------------------------
 app.include_router(admin.router)
 app.include_router(auth.router)
