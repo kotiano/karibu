@@ -50,7 +50,15 @@ _INTERACTIVE_STATUSES = {"send_otp", "send_pin", "send_phone", "send_birthday", 
 
 
 class PaystackError(Exception):
-    """Raised when Paystack returns an error or is unreachable."""
+    """Raised when Paystack returns an error or is unreachable.
+
+    Carries the response's `data` object, because a *declined* charge still
+    comes back with a reference worth recording (see charge_mobile_money).
+    """
+
+    def __init__(self, message: str, *, data: dict | None = None):
+        super().__init__(message)
+        self.data = data or {}
 
 
 def is_configured() -> bool:
@@ -114,7 +122,19 @@ async def _post(path: str, payload: dict) -> dict:
     # the transaction, which lives in data.status. Conflating the two is the
     # classic Paystack integration bug.
     if not body.get("status"):
-        raise PaystackError(body.get("message") or "Paystack rejected the request")
+        data = body.get("data") or {}
+        # The envelope `message` is generic to the point of being useless —
+        # a declined charge says "Charge attempted", which tells the owner
+        # nothing. The reason a human can act on is in data.message (e.g.
+        # "Declined. Please use the test mobile money number..."). Prefer it,
+        # and fall back through the envelope to a last-resort string.
+        detail = (
+            data.get("message")
+            or data.get("gateway_response")
+            or body.get("message")
+            or "Paystack rejected the request"
+        )
+        raise PaystackError(detail, data=data)
     return body.get("data") or {}
 
 
@@ -152,7 +172,25 @@ async def charge_mobile_money(
     if metadata:
         payload["metadata"] = metadata
 
-    data = await _post("/charge", payload)
+    try:
+        data = await _post("/charge", payload)
+    except PaystackError as exc:
+        # A *declined* charge is not a transport failure: Paystack returns
+        # HTTP 400 with status=false, but the body still carries a real
+        # reference and the decline reason. Report it as a cleanly failed
+        # charge so the reference is stored (making the transaction findable
+        # in Paystack's dashboard) and the owner sees why it failed, rather
+        # than losing both to a generic exception.
+        reference = exc.data.get("reference")
+        if reference:
+            logger.info("Paystack declined charge %s: %s", reference, exc)
+            return {
+                "reference": reference,
+                "status": STATUS_FAILED,
+                "display_text": str(exc),
+                "simulated": False,
+            }
+        raise
 
     reference = data.get("reference")
     if not reference:

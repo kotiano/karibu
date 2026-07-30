@@ -1,9 +1,40 @@
 """Order + billing schemas."""
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainValidator
 
 from app.schemas.common import ORMModel
+
+
+def _to_naive_utc(value):
+    """Coerce an incoming datetime to naive UTC.
+
+    Every datetime column in this app is a naive `DateTime` holding UTC (the
+    models default to `datetime.utcnow`), but JSON clients send ISO-8601 with
+    an offset — the mobile app uses `Date.toISOString()`, which always ends in
+    "Z". Pydantic parses that into a *tz-aware* datetime, and mixing the two
+    breaks in two places:
+
+      - asyncpg rejects an aware datetime for a `TIMESTAMP WITHOUT TIME ZONE`
+        column, so recording a debt 500s on Postgres;
+      - `Debt.is_overdue` compares it against naive `utcnow()` and raises
+        "can't compare offset-naive and offset-aware datetimes".
+
+    Converting to UTC and dropping the tzinfo here keeps the boundary honest:
+    an offset the client sends is respected (not silently reinterpreted), and
+    everything downstream stays uniformly naive-UTC.
+    """
+    if isinstance(value, str):
+        # Python < 3.11 can't parse a trailing "Z"; normalise it first.
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+# A datetime accepted from a client, normalised to the naive UTC the DB uses.
+NaiveUTCDatetime = Annotated[datetime, PlainValidator(_to_naive_utc)]
 
 
 # --- Order requests ---------------------------------------------------------
@@ -33,7 +64,7 @@ class OrderPaymentIn(BaseModel):
     # Required only when method == "debt": who owes and when it's due.
     customer_name: str | None = None
     customer_phone: str | None = None
-    due_date: datetime | None = None
+    due_date: NaiveUTCDatetime | None = None
 
 
 class DebtPaymentIn(BaseModel):

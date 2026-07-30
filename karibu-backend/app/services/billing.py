@@ -226,7 +226,9 @@ async def initiate_charge(
             },
         )
     except paystack.PaystackError as exc:
-        charge.mark_failed(None, f"Payment request failed: {exc}")
+        # result_desc is String(255); an unbounded gateway message would raise
+        # a DataError on Postgres and lose the charge's failure state entirely.
+        charge.mark_failed(None, f"Payment request failed: {exc}"[:255])
         await db.commit()
         return charge
 
@@ -241,7 +243,9 @@ async def initiate_charge(
         charge.mark_success(result["reference"], 0, "Paid")
         await _apply_successful_payment(db, sub, charge)
     elif result["status"] == paystack.STATUS_FAILED:
-        charge.mark_failed(None, result.get("display_text") or "Payment declined")
+        charge.mark_failed(
+            None, (result.get("display_text") or "Payment declined")[:255]
+        )
         await _apply_failed_payment(db, sub, charge)
     else:
         charge.status = ChargeStatus.PROCESSING
