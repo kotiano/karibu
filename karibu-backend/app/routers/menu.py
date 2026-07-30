@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.dependencies import DbDep, SubscribedUser, require_roles, require_subscription
 from app.core.security import APIError
 from app.core.serializers import menu_item_dict
-from app.models import Category, MenuItem, UserRole
+from app.models import Category, MenuItem, OrderItem, UserRole
 from app.schemas.common import ok
 from app.schemas.menu import CategoryCreate, CategoryUpdate, MenuItemCreate, MenuItemUpdate
 
@@ -49,8 +49,14 @@ async def list_categories(user: SubscribedUser, db: DbDep):
                 "name": c.name,
                 "icon": c.icon,
                 "sort_order": c.sort_order,
-                "item_count": len(c.items),
-                "items": [menu_item_dict(i) for i in c.items if i.is_available],
+                # Archived items are retired: excluded from the count as well as
+                # the list, or a category reads "3 items" while showing 2.
+                "item_count": sum(1 for i in c.items if not i.is_archived),
+                "items": [
+                    menu_item_dict(i)
+                    for i in c.items
+                    if i.is_available and not i.is_archived
+                ],
             }
         )
     await cache_set(cache_key, data, settings.CACHE_MENU_TTL_SECONDS)
@@ -65,7 +71,12 @@ async def list_items(
     search: str | None = None,
     available_only: bool = Query(default=False),
 ):
-    stmt = select(MenuItem).where(MenuItem.restaurant_id == user.restaurant_id)
+    # Archived items are retired from the menu entirely — they exist only to keep
+    # historical order lines referential, so they never appear in a listing.
+    stmt = select(MenuItem).where(
+        MenuItem.restaurant_id == user.restaurant_id,
+        MenuItem.is_archived.is_(False),
+    )
     if category_id:
         stmt = stmt.where(MenuItem.category_id == category_id)
     if available_only:
@@ -151,17 +162,40 @@ async def delete_category(
     user=Depends(require_roles(*MANAGERS)),
     _sub=Depends(require_subscription),
 ):
-    """Delete a category. Refuses if it still has items, so existing orders
-    (which snapshot item names/prices) are never orphaned by surprise."""
+    """Delete a category. Refuses if it still holds items, so existing orders
+    (which snapshot item names/prices) are never orphaned by surprise.
+
+    Archived items block deletion too, even though the owner can no longer see
+    them. Category.items cascades delete-orphan, so removing the category would
+    try to hard-delete those rows — and they only exist to keep historical order
+    lines referential, so that raises the same ForeignKeyViolationError the item
+    endpoint used to 500 on. They get their own message, because
+    "move your items first" is baffling when the category looks empty.
+    """
     cat = await _get_scoped_category(db, category_id, user.restaurant_id)
-    count_res = await db.execute(
-        select(func.count()).select_from(MenuItem).where(MenuItem.category_id == cat.id)
-    )
-    if (count_res.scalar() or 0) > 0:
+
+    counts = (
+        await db.execute(
+            select(MenuItem.is_archived, func.count())
+            .where(MenuItem.category_id == cat.id)
+            .group_by(MenuItem.is_archived)
+        )
+    ).all()
+    live = next((n for archived, n in counts if not archived), 0)
+    archived = next((n for archived, n in counts if archived), 0)
+
+    if live:
         raise APIError(
             "Move or delete this category's items first.",
             status=409,
             errors={"category": "not empty"},
+        )
+    if archived:
+        raise APIError(
+            f"This category still holds {archived} retired item(s) kept for your "
+            f"sales history, so it can't be deleted. You can rename it instead.",
+            status=409,
+            errors={"category": "has_archived_items"},
         )
     await db.delete(cat)
     await db.commit()
@@ -233,19 +267,71 @@ async def delete_item(
     user=Depends(require_roles(*MANAGERS)),
     _sub=Depends(require_subscription),
 ):
-    item = await _get_scoped_item(db, item_id, user.restaurant_id)
-    await db.delete(item)
+    """Remove an item from the menu.
+
+    Two paths, because order_items.menu_item_id is a non-nullable FK to this
+    table:
+
+    - Never ordered  -> a real DELETE. Nothing references it, so leave no residue.
+    - Ordered at least once -> ARCHIVE it. A hard delete raises
+      ForeignKeyViolationError (which is what used to surface as a 500), and
+      cascading would be worse than the crash: it would erase order lines from
+      paid historical orders, silently changing past totals and corrupting the
+      sales history the restaurant does its books from. Archiving takes the item
+      off every menu surface while keeping history intact.
+
+    Either way the caller gets 200 and a message describing what happened.
+    """
+    item = await _get_scoped_item(
+        db, item_id, user.restaurant_id, include_archived=True
+    )
+
+    if item.is_archived:
+        raise APIError("This item is already removed from the menu", status=409)
+
+    times_ordered = (
+        await db.execute(
+            select(func.count())
+            .select_from(OrderItem)
+            .where(OrderItem.menu_item_id == item.id)
+        )
+    ).scalar() or 0
+
+    if times_ordered:
+        item.is_archived = True
+        # An archived item must not linger as "out of stock" on any surface that
+        # only checks availability.
+        item.is_available = False
+        message = (
+            f"'{item.name}' removed from the menu. It stays on "
+            f"{times_ordered} past order(s) so your sales history is unchanged."
+        )
+    else:
+        await db.delete(item)
+        message = f"'{item.name}' deleted."
+
     await db.commit()
     await cache_delete(_categories_cache_key(user.restaurant_id))
-    return ok(message="Menu item deleted")
+    return ok(message=message)
 
 
 # --- Scoped fetch helpers (tenant isolation) --------------------------------
-async def _get_scoped_item(db, item_id: str, restaurant_id: str) -> MenuItem:
+async def _get_scoped_item(
+    db, item_id: str, restaurant_id: str, *, include_archived: bool = False
+) -> MenuItem:
+    """Fetch an item within the caller's restaurant.
+
+    Archived items are invisible by default: they're retired, and existing only
+    to keep historical order lines referential doesn't make them editable. Only
+    delete_item passes include_archived, so it can answer "already removed"
+    rather than a misleading 404.
+    """
+    conditions = [MenuItem.id == item_id, MenuItem.restaurant_id == restaurant_id]
+    if not include_archived:
+        conditions.append(MenuItem.is_archived.is_(False))
+
     result = await db.execute(
-        select(MenuItem)
-        .where(MenuItem.id == item_id, MenuItem.restaurant_id == restaurant_id)
-        .options(selectinload(MenuItem.category))
+        select(MenuItem).where(*conditions).options(selectinload(MenuItem.category))
     )
     item = result.scalar_one_or_none()
     if not item:

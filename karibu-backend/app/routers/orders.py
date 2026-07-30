@@ -118,16 +118,24 @@ async def create_order(body: OrderCreate, user: SubscribedUser, db: DbDep):
     db.add(order)
 
     for line in body.items:
-        # Only items from the caller's own menu are valid.
+        # Only live items from the caller's own menu are valid. Excluding
+        # archived ones matters because a client holding a stale menu (offline
+        # for a shift, or a screen not yet refreshed) would otherwise happily
+        # sell an item the owner has retired.
         result = await db.execute(
             select(MenuItem).where(
                 MenuItem.id == line.menu_item_id,
                 MenuItem.restaurant_id == user.restaurant_id,
+                MenuItem.is_archived.is_(False),
             )
         )
         menu_item = result.scalar_one_or_none()
         if not menu_item:
-            raise APIError(f"Menu item {line.menu_item_id} not found", status=404)
+            raise APIError(
+                f"'{line.menu_item_id}' is no longer on the menu. "
+                f"Refresh the menu and try again.",
+                status=404,
+            )
 
         order.items.append(
             OrderItem(
