@@ -45,15 +45,24 @@ There are two triggers, both funnelling through the same idempotent
    (`POST /api/billing/pay`), e.g. to convert a trial early or clear a past-due
    balance.
 
-Either way, the STK prompt appears on the owner's phone; they enter their PIN;
-Safaricom calls our callback; the subscription advances to ACTIVE.
+Either way, Paystack pushes an M-Pesa STK prompt to the owner's phone; they
+enter their PIN; Paystack posts a `charge.success` webhook; the subscription
+advances to ACTIVE.
+
+> **Why Paystack and not Daraja?** Safaricom's Daraja API needs production
+> credentials that are only issued to a registered company with its own
+> paybill/till. Paystack onboards unregistered "Starter" merchants and resells
+> M-Pesa collection, so the owner's payment experience is identical — an STK
+> prompt and a PIN — without the company paperwork. Starter accounts carry a
+> lifetime collection cap until you upgrade to a registered business.
 
 ## Why it can't double-charge
 
 See `SECURITY.md` → "Billing integrity". In short: a DB unique index allows only
 one open charge per period, row locks serialise concurrent attempts, idempotency
-keys collapse duplicate requests, and duplicate/late M-Pesa callbacks are
-ignored against terminal charges.
+keys collapse duplicate requests, and duplicate/late webhooks are ignored
+against terminal charges. All four live in the database, not the gateway, which
+is why the Daraja → Paystack swap didn't touch any of them.
 
 ## Configuration
 
@@ -65,7 +74,9 @@ All tunable via environment (see `backend/.env.example`):
 | `TRIAL_DAYS` | `14` | Free trial length |
 | `BILLING_PERIOD_DAYS` | `30` | Billing cycle |
 | `DUNNING_RETRY_HOURS` | `0,24,72,120` | Retry offsets; count = attempts before suspension |
-| `CHARGE_STALE_MINUTES` | `10` | Auto-fail an STK with no callback |
+| `CHARGE_STALE_MINUTES` | `10` | Reconcile-then-fail an STK with no webhook |
+| `PAYSTACK_SECRET_KEY` | — | `sk_test_…` / `sk_live_…`. Empty ⇒ charges are simulated |
+| `PAYSTACK_WEBHOOK_ALLOWED_IPS` | — | Optional; leave empty (a stale list 403s real webhooks) |
 
 ## Endpoints
 
@@ -74,21 +85,38 @@ All tunable via environment (see `backend/.env.example`):
 | GET | `/api/billing/subscription` | any staff | Current status |
 | POST | `/api/billing/pay` | owner | Charge now / retry (idempotent) |
 | GET | `/api/billing/charges` | owner/manager | Payment history |
-| POST | `/api/billing/callback/<secret>` | Safaricom | STK result (verified, idempotent) |
+| POST | `/api/billing/webhook/paystack` | Paystack | Transaction result (signature-verified, idempotent) |
 
-## Testing without real M-Pesa keys
+## Testing without real Paystack keys
 
-If `MPESA_CONSUMER_KEY`/`SECRET`/`PASSKEY` are unset, the client **simulates**
-the STK push and returns a fake `CheckoutRequestID`. The rest of the flow
-(charge rows, callback processing, state transitions) is identical, so the whole
-lifecycle is exercisable in development. To drive a "payment", POST a callback:
+If `PAYSTACK_SECRET_KEY` is unset, the client **simulates** the STK push and
+returns a fake `sim_…` reference. The rest of the flow (charge rows, webhook
+processing, state transitions) is identical, so the whole lifecycle is
+exercisable in development.
+
+Webhooks are authenticated by an HMAC-SHA512 signature over the raw body, so a
+hand-rolled test webhook has to be signed:
 
 ```bash
-curl -X POST http://localhost:8000/api/billing/callback/$MPESA_CALLBACK_SECRET \
-  -H "Content-Type: application/json" \
-  -d '{"Body":{"stkCallback":{"CheckoutRequestID":"<id-from-charge>","ResultCode":0,
-       "CallbackMetadata":{"Item":[{"Name":"MpesaReceiptNumber","Value":"QGH7XYZ12"}]}}}}'
+REF="<provider_reference-from-the-charge>"
+BODY="{\"event\":\"charge.success\",\"data\":{\"reference\":\"$REF\",\"gateway_response\":\"Approved\"}}"
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha512 -hmac "$PAYSTACK_SECRET_KEY" -r | cut -d' ' -f1)
+
+curl -X POST http://localhost:8000/api/billing/webhook/paystack \
+  -H "Content-Type: application/json" -H "x-paystack-signature: $SIG" \
+  -d "$BODY"
 ```
 
-For real integration, set the Daraja credentials and a public
-`MPESA_CALLBACK_URL` (use ngrok in dev), and the same code path goes live.
+Note the signature covers the bytes *as sent* — reformatting the JSON after
+signing invalidates it.
+
+For real integration, set `PAYSTACK_SECRET_KEY` and point the webhook URL in
+**Paystack → Settings → API Keys & Webhooks** at a public
+`/api/billing/webhook/paystack` (use ngrok in dev). The same code path goes live.
+
+### Reconciling a lost webhook
+
+Paystack retries a failed webhook (every 3 min ×4, then hourly for 72 h), but if
+one is still never delivered the stale-charge sweep calls
+`GET /transaction/verify/:reference` before failing a charge — so a payment that
+really succeeded is recovered rather than being failed and billed again.

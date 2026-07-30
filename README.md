@@ -89,8 +89,8 @@ physical device use your machine's LAN IP, not `localhost`.
 
 ```bash
 cd deploy
-# set SECRET_KEY, JWT_SECRET_KEY, MPESA_CALLBACK_SECRET, DB_PASSWORD, and
-# (for real payments) the MPESA_* Daraja credentials in your environment/.env
+# set SECRET_KEY, JWT_SECRET_KEY, DB_PASSWORD, EMAIL_API_KEY, and
+# (for real payments) PAYSTACK_SECRET_KEY in your environment/.env
 docker compose -f docker-compose.prod.yml up --build
 ```
 
@@ -115,7 +115,7 @@ All routes except `/auth/*`, `/health`, and the M-Pesa callback require
 | Billing | GET | `/api/billing/subscription` |
 | Billing | POST | `/api/billing/pay` (idempotent charge) |
 | Billing | GET | `/api/billing/charges` |
-| Billing | POST | `/api/billing/callback/<secret>` (Safaricom) |
+| Billing | POST | `/api/billing/webhook/paystack` (Paystack, signature-verified) |
 | Menu | GET | `/api/menu/categories` · `/api/menu/items` |
 | Menu | POST/PATCH/DELETE | `/api/menu/items` (manager+) |
 | Orders | GET/POST | `/api/orders` |

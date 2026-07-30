@@ -4,7 +4,7 @@
 #   - binds $PORT (defaults to 8000) so hosts that inject a port just work
 #   - runs `alembic upgrade head` on start, so the schema is always current
 #
-# Build:  docker build -t karibu-pos-api:latest ./backend
+# Build:  docker build -t karibu-pos-api:latest ./karibu-backend
 # Run:    docker run -p 8000:8000 --env-file backend/.env karibu-pos-api:latest
 FROM python:3.12-slim
 

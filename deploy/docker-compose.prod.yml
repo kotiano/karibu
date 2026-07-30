@@ -25,14 +25,33 @@ x-app-env: &app-env
   SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
   FORCE_HTTPS: "true"
-  
-  MPESA_ENV: ${MPESA_ENV:-sandbox}
-  MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY:-}
-  MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET:-}
-  MPESA_SHORTCODE: ${MPESA_SHORTCODE:-174379}
-  MPESA_PASSKEY: ${MPESA_PASSKEY:-}
-  MPESA_CALLBACK_URL: ${MPESA_CALLBACK_URL:-}
-  MPESA_CALLBACK_SECRET: ${MPESA_CALLBACK_SECRET:?set MPESA_CALLBACK_SECRET}
+
+  # Email is REQUIRED in production — signup emails a 6-digit code and login is
+  # blocked until it's confirmed, so the app refuses to boot without a working
+  # transport. `:?` fails the compose run up front with a clear message rather
+  # than letting the containers crash-loop.
+  #
+  # Sends from karibupos@gmail.com over Brevo's HTTPS API. The sender address
+  # must be verified under Brevo -> Senders first, or every send returns 400.
+  EMAIL_PROVIDER: ${EMAIL_PROVIDER:-brevo}
+  EMAIL_API_KEY: ${EMAIL_API_KEY:?set EMAIL_API_KEY (Brevo xkeysib-… key)}
+  EMAIL_FROM: ${EMAIL_FROM:-Karibu POS <karibupos@gmail.com>}
+  # Only read when EMAIL_PROVIDER=smtp. Outbound SMTP is open on a VPS, so this
+  # stack can fall back to it — but then EMAIL_FROM must match SMTP_USER.
+  SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-karibupos@gmail.com}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+
+  # Paystack collects the M-Pesa subscription payments. sk_test_… exercises the
+  # flow without moving money; the app refuses to boot in production if this is
+  # empty, because an empty key silently simulates every charge.
+  PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:?set PAYSTACK_SECRET_KEY (sk_test_… or sk_live_…)}
+  PAYSTACK_PUBLIC_KEY: ${PAYSTACK_PUBLIC_KEY:-}
+  # Leave empty: Paystack's published egress IPs can change, and a stale list
+  # 403s every real webhook. The HMAC signature is the actual authentication.
+  PAYSTACK_WEBHOOK_ALLOWED_IPS: ${PAYSTACK_WEBHOOK_ALLOWED_IPS:-}
 
 services:
   postgres:
@@ -57,7 +76,7 @@ services:
 
   # --- Migrations run once before the app replicas start -------------------
   migrate:
-    build: ../backend
+    build: ../karibu-backend
     command: alembic upgrade head
     environment:
       <<: *app-env
@@ -69,7 +88,7 @@ services:
 
   # --- App replicas (load balanced, scheduler OFF) -------------------------
   app1: &app
-    build: ../backend
+    build: ../karibu-backend
     command: gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers 3 --bind 0.0.0.0:8000 --timeout 60
     environment:
       <<: *app-env
@@ -93,7 +112,7 @@ services:
 
   # --- Scheduler: exactly ONE instance runs the billing sweep --------------
   scheduler:
-    build: ../backend
+    build: ../karibu-backend
     command: gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:8000
     environment:
       <<: *app-env

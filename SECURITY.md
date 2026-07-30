@@ -139,14 +139,24 @@ strictest treatment in the system:
 - Billing endpoints stay reachable while suspended, so an owner can always pay
   to restore access.
 
-## Payment callback security
+## Payment webhook security
 
-The M-Pesa callback can't be behind login (Safaricom calls it), so it is
+The Paystack webhook can't be behind login (Paystack calls it), so it is
 protected by:
-1. A **secret path segment** — forged callbacks to a guessed URL get `404`.
-2. An optional **source-IP allowlist** (Safaricom egress ranges).
-3. **Idempotent processing** — even a valid replayed callback can't double-apply.
-4. It never returns application errors to Safaricom (always a clean ack), so
+1. An **HMAC-SHA512 signature** over the raw request body, keyed with
+   `PAYSTACK_SECRET_KEY` and compared with `hmac.compare_digest`. An unsigned or
+   mis-signed request gets `404`. This is strictly stronger than the secret path
+   segment the old Daraja callback used: the secret never travels in a URL, so
+   it can't leak through proxy logs, browser history or a referrer header, and
+   the signature also proves the body wasn't tampered with in transit.
+2. An optional **source-IP allowlist** (`PAYSTACK_WEBHOOK_ALLOWED_IPS`),
+   deliberately empty by default — Paystack's published egress IPs can change,
+   and a stale allowlist would silently `403` every real webhook.
+3. **Idempotent processing** — even a valid replayed webhook can't double-apply.
+   This matters more than it did with Daraja: Paystack *deliberately* re-sends
+   until it gets a 200 (every 3 min ×4, then hourly for 72 h), so replays are
+   routine rather than exceptional.
+4. It never returns application errors to Paystack (always a clean ack), so
    internal state can't be probed through it.
 
 ## Transport & headers
@@ -172,9 +182,9 @@ protected by:
 
 - **Compromised credentials / phishing.** If an owner's password is stolen, the
   attacker can act as them. Mitigate with strong passwords and (future) 2FA.
-- **A malicious or compromised M-Pesa/Safaricom side.** We trust Daraja's
-  responses; we validate what we can (secret path, idempotency) but cannot audit
-  their infrastructure.
+- **A malicious or compromised payment-gateway side.** We trust Paystack's
+  responses; we validate what we can (webhook signature, idempotency) but cannot
+  audit their infrastructure or Safaricom's behind them.
 - **Zero-day vulnerabilities** in dependencies or the OS. Mitigate by keeping
   dependencies patched (`pip-audit`, Dependabot) and monitoring.
 - **A determined insider with database access.** Protect DB credentials and
@@ -203,5 +213,6 @@ protected by:
 4. Run **`pip-audit`** in CI and enable Dependabot.
 5. Rotate secrets via a manager (AWS Secrets Manager / Vault), not env files.
 6. Add automated **database backups** with tested restores.
-7. Consider **webhook signature verification** if Safaricom enables it for your
-   shortcode, in addition to the secret path.
+7. Rotate `PAYSTACK_SECRET_KEY` from the Paystack dashboard if it is ever
+   exposed — it both authorises charges and verifies webhook signatures, so a
+   leak lets an attacker forge payment confirmations.

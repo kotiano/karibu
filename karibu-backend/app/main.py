@@ -73,9 +73,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Nothing else can reach the app directly, so trusting the immediate peer's
 # X-Forwarded-For/-Proto is safe. Without this, Gunicorn/Uvicorn never
 # rewrites request.client (it only trusts 127.0.0.1 by default), so it's
-# always the proxy's IP — silently breaking the M-Pesa callback IP allowlist
-# (every real Safaricom callback would 403) and collapsing the per-IP rate
-# limiter into one shared bucket for every caller.
+# always the proxy's IP — silently breaking the Paystack webhook IP allowlist
+# (every real webhook would 403) and collapsing the per-IP rate limiter into
+# one shared bucket for every caller.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # --- CORS -------------------------------------------------------------------

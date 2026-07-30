@@ -95,7 +95,7 @@ def charge_dict(charge: BillingCharge) -> dict:
         "currency": charge.currency,
         "period_start": charge.period_start,
         "period_end": charge.period_end,
-        "mpesa_receipt": charge.mpesa_receipt,
+        "provider_receipt": charge.provider_receipt,
         "result_desc": charge.result_desc,
         "attempt_number": charge.attempt_number,
         "requested_at": charge.requested_at,

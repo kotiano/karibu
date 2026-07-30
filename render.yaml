@@ -4,7 +4,7 @@
 # or set the service up manually using these values as a guide.
 #
 # It provisions:
-#   - a Docker web service (the FastAPI backend), built from backend/Dockerfile.render
+#   - a Docker web service (the FastAPI backend), built from karibu-backend/Dockerfile
 #   - a managed Postgres database, auto-wired into DATABASE_URL
 #
 # Secrets marked `sync: false` are NOT stored in the repo — you set them in the
@@ -21,8 +21,8 @@ services:
   - type: web
     name: karibu-api
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile.render
-    dockerContext: ./backend
+    dockerfilePath: ./karibu-backend/Dockerfile
+    dockerContext: ./karibu-backend
     plan: starter
     healthCheckPath: /api/health
     envVars:
@@ -36,8 +36,6 @@ services:
       - key: SECRET_KEY
         generateValue: true
       - key: JWT_SECRET_KEY
-        generateValue: true
-      - key: MPESA_CALLBACK_SECRET
         generateValue: true
 
       # --- Fixed for production ---
@@ -57,16 +55,54 @@ services:
       - key: CORS_ORIGINS
         sync: false
 
-      # --- M-Pesa: leave in sandbox until you go live (set these later) ---
-      - key: MPESA_ENV
-        value: sandbox
-      - key: MPESA_CONSUMER_KEY
+      # --- Email: REQUIRED — the app will not boot without it ---------------
+      # Signup emails a 6-digit code and login is blocked until it's confirmed,
+      # so without working email nobody can create an account.
+      #
+      # Sends from karibupos@gmail.com over Brevo's HTTPS API (port 443).
+      #
+      # WHY NOT SMTP: Render's free tier firewalls outbound 25/465/587. Gmail
+      # SMTP from this instance times out on IPv4 and has no IPv6 route —
+      # confirmed by [smtp-diagnose] in the deploy logs. That is a network
+      # block outside the app; no credential or port setting works around it.
+      # Port 443 is open (Paystack already calls out over it), so we use the API.
+      #
+      # EMAIL_API_KEY is the one secret to set in the dashboard: brevo.com ->
+      # SMTP & API -> API Keys. The sender address must first be verified under
+      # Senders, or every send returns HTTP 400.
+      - key: EMAIL_PROVIDER
+        value: brevo
+      - key: EMAIL_API_KEY
+        sync: false          # <-- set this one in the dashboard
+      - key: EMAIL_FROM
+        value: Karibu POS <karibupos@gmail.com>
+      #
+      # Moving to a paid instance or a VPS later? Outbound SMTP works there:
+      # set EMAIL_PROVIDER=smtp plus SMTP_HOST/PORT/USER/PASSWORD/USE_TLS. Set
+      # EMAIL_DIAGNOSE_ON_BOOT=true to have the app log, at startup, whether
+      # the host can reach the SMTP server at all.
+
+      # --- Paystack: REQUIRED — the app will not boot without the secret key -
+      # Subscriptions are collected as M-Pesa STK pushes through Paystack
+      # rather than Safaricom's Daraja API: Daraja production access requires a
+      # registered company with its own paybill/till, while Paystack onboards
+      # unregistered "Starter" merchants.
+      #
+      # Set PAYSTACK_SECRET_KEY in the dashboard from Paystack -> Settings ->
+      # API Keys & Webhooks. Use sk_test_... until the business is approved;
+      # with it empty the app refuses to boot, which is deliberate — an empty
+      # key silently simulates every charge and no money would ever arrive.
+      #
+      # On that same Paystack page, set the webhook URL to:
+      #   https://<this-service>.onrender.com/api/billing/webhook/paystack
+      # It's authenticated by an HMAC-SHA512 signature over the request body,
+      # so nothing secret travels in the URL.
+      - key: PAYSTACK_SECRET_KEY
+        sync: false          # <-- set this one in the dashboard
+      - key: PAYSTACK_PUBLIC_KEY
         sync: false
-      - key: MPESA_CONSUMER_SECRET
-        sync: false
-      - key: MPESA_SHORTCODE
-        sync: false
-      - key: MPESA_PASSKEY
-        sync: false
-      - key: MPESA_CALLBACK_URL
-        sync: false
+      # Deliberately unset: Paystack's published webhook source IPs can change,
+      # and a stale allowlist 403s every real webhook. The signature is the
+      # actual authentication.
+      - key: PAYSTACK_WEBHOOK_ALLOWED_IPS
+        value: ""

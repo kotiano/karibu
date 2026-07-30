@@ -1,6 +1,5 @@
 """Billing routes: subscription status, owner-initiated pay/retry, charge
-history, and the M-Pesa STK callback receiver (public, verified, idempotent)."""
-import hmac
+history, and the Paystack webhook receiver (public, verified, idempotent)."""
 import json
 
 from fastapi import APIRouter, Depends, Request
@@ -18,7 +17,7 @@ from app.core.serializers import charge_dict, subscription_dict
 from app.models import BillingCharge, ChargeStatus, Restaurant, Subscription, UserRole
 from app.schemas.common import ok
 from app.schemas.order import PayRequest
-from app.services import billing
+from app.services import billing, paystack
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -93,34 +92,39 @@ async def list_charges(db: DbDep, user=Depends(require_roles(*MANAGERS))):
     return ok({"charges": [charge_dict(c) for c in charges]})
 
 
-# --- M-Pesa callback (public, verified) ------------------------------------
-@router.post("/callback/{secret}")
-async def mpesa_callback(secret: str, request: Request, db: DbDep):
-    """Receive an STK result from Safaricom.
+# --- Paystack webhook (public, signature-verified) --------------------------
+@router.post("/webhook/paystack")
+async def paystack_webhook(request: Request, db: DbDep):
+    """Receive a transaction result from Paystack.
 
-    Verified by a secret path segment + optional IP allowlist, then processed
-    idempotently. Always acks 200 so Safaricom doesn't retry endlessly.
+    Authenticated by the x-paystack-signature header (HMAC-SHA512 of the body,
+    keyed with our secret key), then processed idempotently. Always acks 200 on
+    an authentic webhook so Paystack stops retrying — it re-sends every 3
+    minutes, then hourly for 72 hours, until it sees one.
     """
-    # Constant-time comparison: a plain != leaks how many leading characters
-    # matched via response timing, letting an attacker recover the secret
-    # byte-by-byte. compare_digest closes that channel.
-    if not secret or not hmac.compare_digest(secret, settings.MPESA_CALLBACK_SECRET):
+    # The signature covers the bytes exactly as sent. Parsing to JSON and
+    # re-serialising reorders keys and changes whitespace, producing a
+    # different digest — so hash the raw body, then parse.
+    raw_body = await request.body()
+    if not paystack.verify_webhook(raw_body, request.headers.get("x-paystack-signature")):
         raise APIError("Not found", status=404)
 
-    if settings.callback_allowed_ips:
+    # Defence in depth behind the signature, and off by default: Paystack's
+    # published source IPs can change, and a stale allowlist would 403 every
+    # real webhook.
+    if settings.paystack_allowed_ips:
         client_ip = request.client.host if request.client else None
-        if client_ip not in settings.callback_allowed_ips:
+        if client_ip not in settings.paystack_allowed_ips:
             raise APIError("Forbidden", status=403)
 
     try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    raw = json.dumps(payload)[:5000]
+        event = json.loads(raw_body)
+    except ValueError:
+        event = {}
 
     try:
-        await billing.process_callback(db, payload, raw)
+        await billing.process_webhook(db, event, raw_body.decode("utf-8", "replace")[:5000])
     except Exception:
         await db.rollback()
 
-    return {"ResultCode": 0, "ResultDesc": "Accepted"}
+    return {"status": "ok"}

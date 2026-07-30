@@ -1,12 +1,13 @@
 """Subscription + billing models.
 
-The correctness guarantees against double-billing are identical to the Flask
-version and live at the SQLAlchemy/DB level, so they port unchanged:
+The correctness guarantees against double-billing live at the SQLAlchemy/DB
+level, so they survived both the Flask→FastAPI port and the Daraja→Paystack
+gateway swap unchanged:
 
 1. One OPEN charge per period — a partial unique index the DB enforces.
 2. Idempotency key per attempt.
-3. Callback idempotency via unique CheckoutRequestID + ProcessedCallback ledger.
-4. Terminal charge states that later callbacks can't reopen.
+3. Webhook idempotency via a unique gateway reference + ProcessedCallback ledger.
+4. Terminal charge states that later webhooks can't reopen.
 """
 from __future__ import annotations
 
@@ -118,11 +119,14 @@ class BillingCharge(BaseModel):
         String(80), unique=True, nullable=False, index=True
     )
 
-    mpesa_checkout_id: Mapped[str | None] = mapped_column(
-        String(80), unique=True, nullable=True, index=True
+    # The payment gateway's own transaction id (a Paystack reference). Unique,
+    # so a replayed webhook can never be matched to a second charge.
+    provider_reference: Mapped[str | None] = mapped_column(
+        String(100), unique=True, nullable=True, index=True
     )
-    mpesa_merchant_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    mpesa_receipt: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # What the customer sees on their statement — the M-Pesa confirmation code
+    # where the gateway exposes it, otherwise the gateway reference.
+    provider_receipt: Mapped[str | None] = mapped_column(String(40), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     result_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -153,7 +157,7 @@ class BillingCharge(BaseModel):
 
     def mark_success(self, receipt: str | None, code: int, desc: str) -> None:
         self.status = ChargeStatus.SUCCESS
-        self.mpesa_receipt = receipt
+        self.provider_receipt = receipt
         self.result_code = code
         self.result_desc = desc
         self.finalized_at = datetime.utcnow()
@@ -166,13 +170,18 @@ class BillingCharge(BaseModel):
 
 
 class ProcessedCallback(BaseModel):
-    """Ledger of accepted M-Pesa callbacks, keyed by CheckoutRequestID, for O(1)
-    duplicate detection and raw audit."""
+    """Ledger of accepted gateway webhooks, keyed by the gateway's transaction
+    reference, for O(1) duplicate detection and raw audit.
+
+    Paystack retries a webhook every 3 minutes (then hourly for 72 hours) until
+    it sees a 200, so duplicates are the norm rather than the exception and this
+    ledger is what makes reprocessing a no-op.
+    """
 
     __tablename__ = "processed_callbacks"
 
-    checkout_id: Mapped[str] = mapped_column(
-        String(80), unique=True, nullable=False, index=True
+    reference: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True
     )
     result_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)

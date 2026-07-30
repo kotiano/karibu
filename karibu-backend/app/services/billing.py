@@ -1,9 +1,11 @@
 """Async billing engine.
 
-Same four safeguards as the Flask version (see models/subscription.py docstring):
-one open charge per period (DB unique index), row locking, idempotency keys, and
-idempotent callback processing against terminal charges. The logic is identical;
-only the DB calls are async.
+Same four safeguards as ever (see models/subscription.py docstring): one open
+charge per period (DB unique index), row locking, idempotency keys, and
+idempotent webhook processing against terminal charges. Swapping the payment
+gateway from Daraja to Paystack changed only how a charge is initiated and
+confirmed — every double-billing guarantee below is enforced by the database,
+not the gateway, so none of it moved.
 
 All functions take an AsyncSession so they compose with FastAPI's request
 session and with the scheduler's own session.
@@ -26,7 +28,22 @@ from app.models import (
     UserRole,
 )
 from app.services import email as email_service
-from app.services import mpesa
+from app.services import paystack
+
+
+async def _owner_for(db: AsyncSession, restaurant_id: str) -> User | None:
+    """The restaurant's owner — the human a charge is billed to.
+
+    Paystack keys every transaction to a customer email (unlike Daraja, which
+    only ever saw a phone number), so this is now on the charge path and not
+    just the notification path.
+    """
+    result = await db.execute(
+        select(User)
+        .where(User.restaurant_id == restaurant_id, User.role == UserRole.OWNER)
+        .order_by(User.created_at)
+    )
+    return result.scalars().first()
 
 
 async def _notify_owner_payment_issue(db: AsyncSession, sub: Subscription) -> None:
@@ -39,16 +56,7 @@ async def _notify_owner_payment_issue(db: AsyncSession, sub: Subscription) -> No
         restaurant = await db.get(Restaurant, sub.restaurant_id)
         if not restaurant:
             return
-        owner = (
-            await db.execute(
-                select(User)
-                .where(
-                    User.restaurant_id == sub.restaurant_id,
-                    User.role == UserRole.OWNER,
-                )
-                .order_by(User.created_at)
-            )
-        ).scalars().first()
+        owner = await _owner_for(db, sub.restaurant_id)
         if not owner:
             return
 
@@ -131,12 +139,6 @@ def _idempotency_key(sub: Subscription, period_start: datetime, attempt: int) ->
     return f"sub_{sub.id}_{period_start.strftime('%Y%m%d')}_a{attempt}"
 
 
-def _callback_url() -> str:
-    base = settings.MPESA_CALLBACK_URL.rstrip("/")
-    secret = settings.MPESA_CALLBACK_SECRET
-    return f"{base}/{secret}" if base else f"https://example.invalid/{secret}"
-
-
 async def initiate_charge(
     db: AsyncSession,
     subscription_id: str,
@@ -170,8 +172,10 @@ async def initiate_charge(
         await db.commit()
         return dup
 
-    # Load the restaurant for the billing phone.
+    # Load the restaurant for the billing phone, and the owner for the email
+    # Paystack requires on every transaction.
     restaurant = await db.get(Restaurant, sub.restaurant_id)
+    owner = await _owner_for(db, sub.restaurant_id)
 
     charge = BillingCharge(
         subscription_id=sub.id,
@@ -198,54 +202,98 @@ async def initiate_charge(
             return open_charge
         raise
 
-    # Push STK (or simulate). On failure, fail the charge cleanly so a retry can
-    # create a fresh one.
-    try:
-        result = await mpesa.stk_push(
-            phone=charge.phone or "",
-            amount_cents=charge.amount_cents,
-            account_reference="KaribuPOS",
-            description="Subscription",
-            callback_url=_callback_url(),
-        )
-    except mpesa.MpesaError as exc:
-        charge.mark_failed(None, f"STK push failed: {exc}")
+    # Paystack bills a customer email, not just a phone. Without an owner on
+    # file there is nobody to charge — fail the charge rather than send a
+    # malformed request the gateway would reject anyway.
+    if not owner:
+        charge.mark_failed(None, "No owner account on file to bill")
         await db.commit()
         return charge
 
-    charge.mpesa_checkout_id = result["checkout_id"]
-    charge.mpesa_merchant_id = result.get("merchant_id")
-    charge.status = ChargeStatus.PROCESSING
+    # Push the M-Pesa STK prompt (or simulate). On failure, fail the charge
+    # cleanly so a retry can create a fresh one.
+    try:
+        result = await paystack.charge_mobile_money(
+            email=owner.email,
+            phone=charge.phone or "",
+            amount_cents=charge.amount_cents,
+            currency=charge.currency,
+            metadata={
+                "restaurant_id": sub.restaurant_id,
+                "subscription_id": sub.id,
+                "charge_id": charge.id,
+                "idempotency_key": key,
+            },
+        )
+    except paystack.PaystackError as exc:
+        charge.mark_failed(None, f"Payment request failed: {exc}")
+        await db.commit()
+        return charge
+
+    charge.provider_reference = result["reference"]
+
+    # Only "success"/"failed" are final. Anything else (normally "pay_offline"
+    # — the customer is being asked for their PIN) stays PROCESSING until the
+    # webhook lands, with _expire_stale_charges as the backstop if it never
+    # does. Treating an unrecognised state as failure here would be the unsafe
+    # choice: the customer can still complete the payment seconds later.
+    if result["status"] == paystack.STATUS_SUCCESS:
+        charge.mark_success(result["reference"], 0, "Paid")
+        await _apply_successful_payment(db, sub, charge)
+    elif result["status"] == paystack.STATUS_FAILED:
+        charge.mark_failed(None, result.get("display_text") or "Payment declined")
+        await _apply_failed_payment(db, sub, charge)
+    else:
+        charge.status = ChargeStatus.PROCESSING
+
     await db.commit()
     return charge
 
 
-# --- Callback processing ---------------------------------------------------
-async def process_callback(db: AsyncSession, payload: dict, raw_body: str) -> str:
-    """Apply an STK callback exactly once. Returns a short status string."""
-    stk = (payload.get("Body") or {}).get("stkCallback") or {}
-    checkout_id = stk.get("CheckoutRequestID")
-    if not checkout_id:
-        return "ignored_no_checkout_id"
+# --- Webhook processing ----------------------------------------------------
+# Paystack fires charge.success on payment and charge.failed when the customer
+# cancels or has insufficient funds. Anything else (transfers, refunds,
+# subscriptions we don't use) is acknowledged and ignored.
+_SUCCESS_EVENTS = {"charge.success"}
+_FAILURE_EVENTS = {"charge.failed"}
 
-    result_code = stk.get("ResultCode")
-    result_desc = stk.get("ResultDesc", "")
 
-    # Dedupe at the ledger level first (before locking anything).
+async def process_webhook(db: AsyncSession, event: dict, raw_body: str) -> str:
+    """Apply a Paystack webhook exactly once. Returns a short status string.
+
+    The caller must have already verified the HMAC signature — this function
+    trusts its input.
+    """
+    event_type = (event.get("event") or "").lower()
+    data = event.get("data") or {}
+    reference = data.get("reference")
+    if not reference:
+        return "ignored_no_reference"
+    if event_type not in _SUCCESS_EVENTS and event_type not in _FAILURE_EVENTS:
+        return f"ignored_event_{event_type or 'unknown'}"
+
+    succeeded = event_type in _SUCCESS_EVENTS
+    # Paystack's own wording for why a charge ended how it did.
+    result_desc = (data.get("gateway_response") or event_type)[:255]
+
+    # Dedupe at the ledger level first (before locking anything). Paystack
+    # retries until it sees a 200, so this path is hit routinely.
     dup_res = await db.execute(
-        select(ProcessedCallback).where(ProcessedCallback.checkout_id == checkout_id)
+        select(ProcessedCallback).where(ProcessedCallback.reference == reference)
     )
     if dup_res.scalar_one_or_none():
         return "duplicate_ignored"
 
     charge_res = await db.execute(
-        select(BillingCharge).where(BillingCharge.mpesa_checkout_id == checkout_id)
+        select(BillingCharge).where(BillingCharge.provider_reference == reference)
     )
     charge = charge_res.scalar_one_or_none()
     if not charge:
         db.add(
             ProcessedCallback(
-                checkout_id=checkout_id, result_code=result_code, raw_payload=raw_body
+                reference=reference,
+                result_code=0 if succeeded else 1,
+                raw_payload=raw_body,
             )
         )
         await db.commit()
@@ -258,25 +306,28 @@ async def process_callback(db: AsyncSession, payload: dict, raw_body: str) -> st
     if charge.is_terminal:
         db.add(
             ProcessedCallback(
-                checkout_id=checkout_id, result_code=result_code, raw_payload=raw_body
+                reference=reference,
+                result_code=0 if succeeded else 1,
+                raw_payload=raw_body,
             )
         )
         await db.commit()
         return "already_finalized"
 
-    if result_code == 0:
-        receipt = _extract_receipt(stk)
-        charge.mark_success(receipt, result_code, result_desc)
+    if succeeded:
+        charge.mark_success(paystack.extract_receipt(data), 0, result_desc)
         await _apply_successful_payment(db, sub, charge)
         outcome = "success"
     else:
-        charge.mark_failed(result_code, result_desc)
+        charge.mark_failed(1, result_desc)
         await _apply_failed_payment(db, sub, charge)
         outcome = "failed"
 
     db.add(
         ProcessedCallback(
-            checkout_id=checkout_id, result_code=result_code, raw_payload=raw_body
+            reference=reference,
+            result_code=0 if succeeded else 1,
+            raw_payload=raw_body,
         )
     )
     await db.commit()
@@ -285,14 +336,6 @@ async def process_callback(db: AsyncSession, payload: dict, raw_body: str) -> st
     if outcome == "failed":
         await _notify_owner_payment_issue(db, sub)
     return outcome
-
-
-def _extract_receipt(stk: dict) -> str | None:
-    items = (stk.get("CallbackMetadata") or {}).get("Item") or []
-    for item in items:
-        if item.get("Name") == "MpesaReceiptNumber":
-            return str(item.get("Value"))
-    return None
 
 
 async def _apply_successful_payment(db: AsyncSession, sub: Subscription, charge: BillingCharge):
@@ -328,7 +371,7 @@ async def run_billing_sweep(db: AsyncSession, now: datetime | None = None) -> di
     """Idempotent periodic job: charge ended trials, due renewals, and past-due
     retries; fail stale charges. Safe to run repeatedly."""
     now = now or datetime.utcnow()
-    stats = {"charged": 0, "stale_failed": 0, "skipped": 0}
+    stats = {"charged": 0, "stale_failed": 0, "reconciled": 0, "skipped": 0}
 
     await _expire_stale_charges(db, now, stats)
 
@@ -367,7 +410,14 @@ async def run_billing_sweep(db: AsyncSession, now: datetime | None = None) -> di
 
 
 async def _expire_stale_charges(db: AsyncSession, now: datetime, stats: dict):
-    """Fail PROCESSING charges with no callback so they can be retried."""
+    """Fail PROCESSING charges with no webhook so they can be retried.
+
+    Before failing one, ask Paystack what actually happened. A webhook can be
+    lost — a deploy mid-flight, a cold start that times out the delivery — and
+    failing a charge the customer really paid is the worst outcome available
+    here: it drives the subscription toward suspension and the dunning sweep
+    bills them a second time. One verify call per stale charge removes that.
+    """
     cutoff = now - timedelta(minutes=settings.CHARGE_STALE_MINUTES)
     result = await db.execute(
         select(BillingCharge).where(
@@ -377,11 +427,31 @@ async def _expire_stale_charges(db: AsyncSession, now: datetime, stats: dict):
     )
     stale = result.scalars().all()
     for charge in stale:
+        settled = None
+        if charge.provider_reference and paystack.is_configured():
+            try:
+                data = await paystack.verify_transaction(charge.provider_reference)
+                settled = (data.get("status") or "").lower()
+            except paystack.PaystackError:
+                # Gateway unreachable — leave the charge alone and re-check on
+                # the next sweep rather than guessing.
+                continue
+
         sub = await _lock_subscription(db, charge.subscription_id)
         fresh = await db.get(BillingCharge, charge.id)
         if fresh.is_terminal:
             continue
-        fresh.mark_failed(None, "No callback received (timed out)")
+
+        if settled == paystack.STATUS_SUCCESS:
+            fresh.mark_success(paystack.extract_receipt(data), 0, "Reconciled")
+            await _apply_successful_payment(db, sub, fresh)
+            stats["reconciled"] += 1
+            continue
+        if settled and settled not in (paystack.STATUS_FAILED, "abandoned", "reversed"):
+            # Still genuinely pending at the gateway — give it another cycle.
+            continue
+
+        fresh.mark_failed(None, "No confirmation received (timed out)")
         await _apply_failed_payment(db, sub, fresh)
         stats["stale_failed"] += 1
     await db.commit()

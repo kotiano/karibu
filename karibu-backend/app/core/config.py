@@ -51,18 +51,22 @@ class Settings(BaseSettings):
     DUNNING_RETRY_HOURS: str = "0,24,72,120"
     CHARGE_STALE_MINUTES: int = 10
 
-    # --- M-Pesa Daraja (STK Push) -------------------------------------------
-    MPESA_ENV: str = "sandbox"  # sandbox | production
-    MPESA_CONSUMER_KEY: str = ""
-    MPESA_CONSUMER_SECRET: str = ""
-    # Paybill number, OR — if you use a till — the STORE (head office) number.
-    MPESA_SHORTCODE: str = "174379"
-    # Set ONLY if you pay into a till (Buy Goods). Leave blank for a paybill.
-    MPESA_TILL_NUMBER: str = ""
-    MPESA_PASSKEY: str = ""
-    MPESA_CALLBACK_URL: str = ""
-    MPESA_CALLBACK_SECRET: str = "change-me-callback"
-    MPESA_CALLBACK_ALLOWED_IPS: str = ""
+    # --- Paystack (M-Pesa collection) ----------------------------------------
+    # Subscriptions are charged by pushing an M-Pesa STK prompt through
+    # Paystack rather than Safaricom's Daraja API directly: Daraja production
+    # access needs a registered company and its own paybill/till, while
+    # Paystack onboards unregistered "Starter" merchants.
+    #
+    # sk_test_… exercises the full flow against Paystack's test mode; sk_live_…
+    # moves real money. The same key both authenticates outbound calls and
+    # verifies inbound webhook signatures, so it is strictly secret.
+    PAYSTACK_SECRET_KEY: str = ""
+    # Safe to expose; only needed if a client-side Paystack SDK is added later.
+    PAYSTACK_PUBLIC_KEY: str = ""
+    # Paystack's documented webhook source IPs. Defence in depth only — the
+    # HMAC signature is what actually authenticates a webhook, and this list
+    # must be cleared if Paystack ever changes it, or every callback 403s.
+    PAYSTACK_WEBHOOK_ALLOWED_IPS: str = ""
 
     # --- Rate limiting -------------------------------------------------------
     RATELIMIT_STORAGE_URI: str = "memory://"
@@ -162,8 +166,19 @@ class Settings(BaseSettings):
             problems.append("SECRET_KEY is default/too short (need 32+ random chars)")
         if "change-me" in self.JWT_SECRET_KEY or len(self.JWT_SECRET_KEY) < 32:
             problems.append("JWT_SECRET_KEY is default/too short (need 32+ random chars)")
-        if "change-me" in self.MPESA_CALLBACK_SECRET or len(self.MPESA_CALLBACK_SECRET) < 16:
-            problems.append("MPESA_CALLBACK_SECRET is default/too short (need 16+ random chars)")
+        # Without a secret key, charges silently run in simulation mode — every
+        # subscription would appear to bill successfully while no money moves.
+        if not self.PAYSTACK_SECRET_KEY.strip():
+            problems.append(
+                "PAYSTACK_SECRET_KEY is empty — charges would be simulated and "
+                "no real payment would ever be collected"
+            )
+        elif not self.PAYSTACK_SECRET_KEY.startswith(("sk_test_", "sk_live_")):
+            problems.append(
+                "PAYSTACK_SECRET_KEY doesn't look like a secret key (expected "
+                "sk_test_… or sk_live_…) — the public pk_… key can neither "
+                "authorise charges nor verify webhook signatures"
+            )
         if self.CORS_ORIGINS.strip() == "*":
             problems.append("CORS_ORIGINS is '*' (set your app's real origins)")
         if self.ALLOWED_HOSTS.strip() == "*":
@@ -233,8 +248,12 @@ class Settings(BaseSettings):
         return [int(h) for h in self.DUNNING_RETRY_HOURS.split(",") if h.strip() != ""]
 
     @property
-    def callback_allowed_ips(self) -> list[str]:
-        return [ip.strip() for ip in self.MPESA_CALLBACK_ALLOWED_IPS.split(",") if ip.strip()]
+    def paystack_allowed_ips(self) -> list[str]:
+        return [
+            ip.strip()
+            for ip in self.PAYSTACK_WEBHOOK_ALLOWED_IPS.split(",")
+            if ip.strip()
+        ]
 
     @property
     def is_sqlite(self) -> bool:

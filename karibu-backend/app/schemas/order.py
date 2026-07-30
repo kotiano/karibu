@@ -109,7 +109,7 @@ class ChargeOut(BaseModel):
     currency: str
     period_start: datetime
     period_end: datetime
-    mpesa_receipt: str | None = None
+    provider_receipt: str | None = None
     result_desc: str | None = None
     attempt_number: int
     requested_at: datetime

@@ -1,2 +1,25 @@
 .DS_Store
 *.log
+
+# The mobile app lives in its own repo (kotiano/karibu-frontend) and has its
+# own .git here. Tracking it from this repo would record a bare gitlink that
+# nobody can clone — ignore it outright.
+karibu-frontend/
+
+# Personal agent overrides. karibu-backend/.claude/settings.json stays tracked
+# (it already was), but the repo-root one is a per-session permission
+# allowlist full of local scratchpad paths — never useful to share.
+/.claude/
+.claude/settings.local.json
+
+# --- Secrets & local state (belt and braces) --------------------------------
+# karibu-backend/.gitignore already covers these for that directory. Repeating
+# them at the root means a stray copy of .env anywhere in the tree still can't
+# be committed by accident — these files hold live Brevo and Paystack keys.
+.env
+.env.*
+!.env.example
+*.db
+.venv/
+__pycache__/
+*.pyc
