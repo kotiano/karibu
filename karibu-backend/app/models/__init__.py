@@ -18,6 +18,7 @@ from app.models.subscription import (
     ChargeStatus,
     ProcessedCallback,
     Subscription,
+    BillingProvider,
     SubscriptionStatus,
 )
 from app.models.user import User, UserRole
@@ -37,6 +38,7 @@ __all__ = [
     "PaymentMethod",
     "PaymentStatus",
     "Subscription",
+    "BillingProvider",
     "SubscriptionStatus",
     "BillingCharge",
     "ChargeStatus",

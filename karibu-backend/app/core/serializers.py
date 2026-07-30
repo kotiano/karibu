@@ -84,6 +84,9 @@ def subscription_dict(sub: Subscription) -> dict:
         "current_period_end": sub.current_period_end,
         "failed_attempts": sub.failed_attempts,
         "next_retry_at": sub.next_retry_at,
+        # The app needs this to decide whether to show the Play purchase sheet
+        # or the M-Pesa flow.
+        "provider": sub.provider,
     }
 
 

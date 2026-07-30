@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     # must be cleared if Paystack ever changes it, or every callback 403s.
     PAYSTACK_WEBHOOK_ALLOWED_IPS: str = ""
 
+    # --- Google Play Billing --------------------------------------------------
+    # Play requires Google Play Billing for in-app subscriptions to cloud
+    # business software, so this is the rail for anything bought inside the
+    # Android app. Paystack stays available for sales made outside it.
+    GOOGLE_PLAY_PACKAGE_NAME: str = "ke.co.karibupos.app"
+    # The subscription product id created in Play Console -> Monetise ->
+    # Subscriptions. Must match exactly or acknowledge() 404s.
+    GOOGLE_PLAY_PRODUCT_ID: str = "karibu_pos_monthly"
+    # Service-account key JSON, as a single-line string. Prefer this over a file
+    # path on Render, where there is no persistent disk to put a key file on.
+    GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: str = ""
+    # Shared secret appended to the RTDN webhook path. Pub/Sub push
+    # subscriptions cannot send custom headers or sign their payload, so a
+    # secret path segment is the only authentication available at the edge —
+    # every notification is re-verified against Google's API regardless, so a
+    # forged one grants nothing.
+    GOOGLE_PLAY_RTDN_SECRET: str = ""
+
     # --- Rate limiting -------------------------------------------------------
     RATELIMIT_STORAGE_URI: str = "memory://"
     RATELIMIT_DEFAULT: str = "200/minute"
@@ -246,6 +264,35 @@ class Settings(BaseSettings):
     @property
     def dunning_retry_hours(self) -> list[int]:
         return [int(h) for h in self.DUNNING_RETRY_HOURS.split(",") if h.strip() != ""]
+
+    @property
+    def google_play_credentials(self) -> dict | None:
+        """The service-account key, parsed. None when unconfigured.
+
+        Returns None rather than raising on malformed JSON so a bad key
+        degrades to "Play Billing is off" instead of taking the whole app down
+        at import time — the boot guard reports it properly instead.
+        """
+        raw = self.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON.strip()
+        if not raw:
+            return None
+        try:
+            import json
+
+            creds = json.loads(raw)
+        except ValueError:
+            return None
+        if not creds.get("client_email") or not creds.get("private_key"):
+            return None
+        # Render and most dashboards mangle real newlines in a pasted value, so
+        # keys usually arrive with literal "\n". Restore them or RS256 signing
+        # fails with an opaque error.
+        creds["private_key"] = creds["private_key"].replace("\\n", "\n")
+        return creds
+
+    @property
+    def play_billing_enabled(self) -> bool:
+        return bool(self.GOOGLE_PLAY_PACKAGE_NAME and self.google_play_credentials)
 
     @property
     def paystack_allowed_ips(self) -> list[str]:
