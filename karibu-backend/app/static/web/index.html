@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <title>Karibu POS</title>
+    <!-- The `react-native-web` recommended style reset: https://necolas.github.io/react-native-web/docs/setup/#root-element -->
+    <style id="expo-reset">
+      /* These styles make the body full-height */
+      html,
+      body {
+        height: 100%;
+      }
+      /* These styles disable body scrolling if you are using <ScrollView> */
+      body {
+        overflow: hidden;
+      }
+      /* These styles make the root element full-height */
+      #root {
+        display: flex;
+        height: 100%;
+        flex: 1;
+      }
+    </style>
+  <link rel="preload" href="/_expo/static/css/web-980b295cda4847bac166d67a60da7dca.css" as="style">
+<link rel="stylesheet" href="/_expo/static/css/web-980b295cda4847bac166d67a60da7dca.css"><link rel="icon" href="/favicon.ico" />
+    <meta name="theme-color" content="#005C39" />
+    <meta name="description" content="Point of sale for Kenyan restaurants. Take orders, record M-Pesa payments and see your daily sales." />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- iOS has no manifest support; these are the equivalent. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Karibu POS" />
+    <!-- Paint the brand colour before the JS bundle parses, so the first frame
+         isn't a white flash on a dark-green app. -->
+    <style>html,body{background:#005C39}</style>
+  </head>
+
+  <body>
+    <!-- Use static rendering with Expo Router to support running without JavaScript. -->
+    <noscript>
+      You need to enable JavaScript to run this app.
+    </noscript>
+    <!-- The root element for your Expo app. -->
+    <div id="root"></div>
+  <script src="/_expo/static/js/web/index-47809ad2c4d50db3def3cd2dfd2417a4.js" defer></script>
+
+    <script>
+      // Registered after load so it never competes with the app bundle for
+      // bandwidth on a slow connection — which is most of this app's users.
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("/sw.js").catch(function (err) {
+            console.warn("Service worker registration failed:", err);
+          });
+        });
+      }
+    </script>
+  </body>
+</html>
