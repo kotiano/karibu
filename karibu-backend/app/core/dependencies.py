@@ -52,10 +52,38 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def require_roles(*allowed_roles: str):
-    """Dependency factory enforcing the caller holds one of the given roles."""
+async def get_settled_user(user: CurrentUser) -> User:
+    """A user who is not mid-way through a forced password change.
 
-    async def _dep(user: CurrentUser) -> User:
+    Staff created by a manager start with a temporary code and
+    must_change_password set. Until they choose their own, the session may
+    reach exactly one endpoint — /auth/change-password — and nothing else.
+
+    ENFORCED HERE, NOT IN THE UI. The manager who issued the code knows it, so
+    a client-side redirect would leave them able to act as that person by
+    calling the API directly — which is precisely what the served-by
+    attribution is supposed to rule out.
+    """
+    if user.must_change_password:
+        raise APIError(
+            "Set your own password before continuing.",
+            status=403,
+            errors={"must_change_password": "required"},
+        )
+    return user
+
+
+SettledUser = Annotated[User, Depends(get_settled_user)]
+
+
+def require_roles(*allowed_roles: str):
+    """Dependency factory enforcing the caller holds one of the given roles.
+
+    Depends on SettledUser rather than CurrentUser, so every role-gated route
+    inherits the forced-password-change block without having to remember it.
+    """
+
+    async def _dep(user: SettledUser) -> User:
         if user.role not in allowed_roles:
             raise APIError("Insufficient permissions", status=403)
         return user
@@ -70,7 +98,7 @@ async def get_current_restaurant(user: CurrentUser, db: DbDep) -> Restaurant:
     return restaurant
 
 
-async def require_subscription(user: CurrentUser, db: DbDep) -> User:
+async def require_subscription(user: SettledUser, db: DbDep) -> User:
     """Block the request (402) unless the caller's subscription grants access.
 
     Returns the user so routes can chain it; the tenant id is on user.restaurant_id.

@@ -12,14 +12,14 @@ from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.security import APIError
-from app.models import Expense, ExpenseCategory, UserRole
+from app.models import Expense, ExpenseCategory, Restaurant, UserRole
 from app.schemas.common import ok
 from app.schemas.expense import ExpenseCreate, ExpenseUpdate
 from app.services.reports import Report, csv_bytes, money, render
 
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
-MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
+MANAGERS = UserRole.MANAGERS
 
 
 def _expense_dict(e: Expense) -> dict:
@@ -36,7 +36,7 @@ def _expense_dict(e: Expense) -> dict:
     }
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_roles(*MANAGERS))])
 async def list_expenses(
     user: SubscribedUser,
     db: DbDep,
@@ -254,7 +254,11 @@ async def expenses_pdf(
         f"{since:%d %b %Y} - {datetime.utcnow():%d %b %Y}"
         f" ({days} day{'s' if days != 1 else ''})"
     )
-    pdf = Report("Expense report", user.branch_name or "Karibu POS", period)
+    # The report is headed with the restaurant's real name. It used to use
+    # a free-text per-user "branch" label, which nothing scoped by.
+    restaurant = await db.get(Restaurant, user.restaurant_id)
+    restaurant_name = restaurant.name if restaurant else "Karibu POS"
+    pdf = Report("Expense report", restaurant_name, period)
     pdf.alias_nb_pages()
     pdf.add_page()
 

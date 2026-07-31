@@ -41,7 +41,7 @@ async def _owner_for(db: AsyncSession, restaurant_id: str) -> User | None:
     """
     result = await db.execute(
         select(User)
-        .where(User.restaurant_id == restaurant_id, User.role == UserRole.OWNER)
+        .where(User.restaurant_id == restaurant_id, User.role == UserRole.MANAGER)
         .order_by(User.created_at)
     )
     return result.scalars().first()

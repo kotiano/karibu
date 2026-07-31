@@ -15,12 +15,20 @@ class RegisterRequest(BaseModel):
     restaurant_name: str = Field(min_length=1, max_length=160)
     phone: str | None = None
     billing_phone: str | None = None
-    branch_name: str | None = None
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    """Sign-in identifier: an email address or a phone number.
+
+    NOT EmailStr. Staff created by a manager may have only a phone, and
+    validating this as an email would reject them before the handler ever ran.
+    `email` is accepted as an alias so existing clients keep working.
+    """
+
+    identifier: str = Field(min_length=3, max_length=120, alias="email")
     password: str
+
+    model_config = {"populate_by_name": True}
 
 
 class VerifyEmailRequest(BaseModel):
@@ -47,11 +55,15 @@ class ResetPasswordRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class UpdateProfileRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=120)
     phone: str | None = None
     avatar_url: str | None = None
-    branch_name: str | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     current_password: str | None = None
 
@@ -60,11 +72,12 @@ class UpdateProfileRequest(BaseModel):
 class UserOut(ORMModel):
     id: str
     full_name: str
-    email: str
+    # Nullable: staff created by a manager may sign in by phone instead.
+    email: str | None = None
     phone: str | None = None
     role: str
-    branch_name: str
     avatar_url: str | None = None
+    must_change_password: bool = False
     is_active: bool
     is_platform_admin: bool = False
     restaurant_id: str

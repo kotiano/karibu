@@ -79,23 +79,22 @@ def test_exports_are_scoped_to_the_callers_restaurant(client, mail_log, owner):
 
 
 def test_expense_exports_are_manager_only(client, owner):
-    """Expenses are owner/manager on screen; the export must not be a way round
-    that. Verified through the same role dependency the list endpoint uses."""
-    from app.main import app
+    """Exports must not be a way round the gate on the screen.
 
-    # A cashier token would be the direct test, but the API cannot create staff
-    # yet — no endpoint exists. Assert the gate is wired instead, and replace
-    # this with a real cashier once staff accounts land.
+    This used to introspect FastAPI's dependency tree, because the API could
+    not create a non-manager to test with. It now signs in as a real cashier —
+    see tests/test_staff.py, which covers the same ground for every money
+    screen.
+    """
+    from tests.test_staff import onboard
+
+    _, cashier, _ = onboard(client, owner, role="cashier", name="Till Person",
+                            phone="0799000111")
     for path in ("/api/expenses/export.csv", "/api/expenses/export.pdf"):
-        route = next(
-            (r for r in app.routes if getattr(r, "path", None) == path), None
-        )
-        assert route is not None, f"{path} is not registered"
-        gated = any(
-            getattr(d.call, "__qualname__", "").startswith("require_roles")
-            for d in route.dependant.dependencies
-        )
-        assert gated, f"{path} is not behind require_roles"
+        assert client.get(path, headers=cashier).status_code == 403, path
+
+    # And the manager who owns the figures still gets them.
+    assert client.get("/api/expenses/export.csv", headers=owner["headers"]).status_code == 200
 
 
 def test_export_window_is_bounded(client, owner):

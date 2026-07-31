@@ -30,8 +30,7 @@ DEMO_USER = {
     "full_name": "Baraka Otieno",
     "email": "demo@karibupos.co.ke",
     "password": "karibu12345",
-    "role": UserRole.OWNER,
-    "branch_name": "Kilimani Branch",
+    "role": UserRole.MANAGER,
     "billing_phone": "0708374149",
 }
 
@@ -97,7 +96,6 @@ async def seed():
             full_name=DEMO_USER["full_name"],
             email=DEMO_USER["email"],
             role=DEMO_USER["role"],
-            branch_name=DEMO_USER["branch_name"],
             phone=DEMO_USER["billing_phone"],
             restaurant_id=restaurant.id,
         )
@@ -112,8 +110,7 @@ async def seed():
         admin = User(
             full_name="Katiano (Platform Admin)",
             email="admin@karibupos.co.ke",
-            role=UserRole.OWNER,
-            branch_name="HQ",
+            role=UserRole.MANAGER,
             restaurant_id=hq.id,
             is_platform_admin=True,
         )

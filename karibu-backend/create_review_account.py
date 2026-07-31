@@ -116,8 +116,7 @@ async def main() -> int:
             user = User(
                 full_name=args.name,
                 email=email,
-                role=UserRole.OWNER,
-                branch_name="Kilimani Branch",
+                role=UserRole.MANAGER,
                 phone=DEFAULT_PHONE,
                 restaurant_id=restaurant.id,
             )

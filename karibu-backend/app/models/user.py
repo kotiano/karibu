@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from passlib.context import CryptContext
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
@@ -14,28 +14,67 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class UserRole:
-    OWNER = "owner"
+    """Three ranks. Whoever signs the restaurant up is the manager.
+
+    There is no separate "owner" above manager. In a restaurant this size they
+    are the same person, and a rank that only ever has one holder buys nothing
+    but a permission matrix with an unused row.
+
+    RANK ORDER IS LOAD-BEARING — `rank()` is what stops a manager minting
+    another manager, or a cashier promoting themselves.
+    """
+
     MANAGER = "manager"
     CASHIER = "cashier"
     WAITER = "waiter"
 
-    ALL = (OWNER, MANAGER, CASHIER, WAITER)
+    ALL = (MANAGER, CASHIER, WAITER)
+
+    # Everyone who may see money-wide screens and manage staff.
+    MANAGERS = (MANAGER,)
+    # Everyone who may take payment or authorise credit.
+    HANDLES_MONEY = (MANAGER, CASHIER)
+
+    _RANK = {MANAGER: 3, CASHIER: 2, WAITER: 1}
+
+    @classmethod
+    def rank(cls, role: str) -> int:
+        return cls._RANK.get(role, 0)
 
 
 class User(BaseModel):
     __tablename__ = "users"
 
     full_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    email: Mapped[str] = mapped_column(
-        String(120), unique=True, nullable=False, index=True
-    )
-    phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # NULLABLE, and unique only where present. A waiter may genuinely not have
+    # an email address, and requiring one produces a database full of invented
+    # ones. Uniqueness is enforced by a partial index in the migration rather
+    # than a column constraint, because "unique among the rows that have one"
+    # is not expressible here.
+    email: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    # The other login identifier, and the one most staff will actually use.
+    # Unique PER RESTAURANT, not globally: the same person may cook here in the
+    # evening and somewhere else at lunch, and a global constraint would make
+    # the second account impossible.
+    phone: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    role: Mapped[str] = mapped_column(String(20), default=UserRole.CASHIER, nullable=False)
-    branch_name: Mapped[str] = mapped_column(
-        String(120), default="Main Branch", nullable=False
+    role: Mapped[str] = mapped_column(String(20), default=UserRole.WAITER, nullable=False)
+
+    # Set when a manager creates the account with a temporary code. While true
+    # the session can reach exactly one endpoint — change-password — so the
+    # manager who issued the code cannot go on acting as this person. That is
+    # what makes "served by Jane" mean anything.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
     )
+    invited_by_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -94,6 +133,17 @@ class User(BaseModel):
     )
 
     orders: Mapped[list["Order"]] = relationship(back_populates="server")
+
+    __table_args__ = (
+        # One phone per restaurant. The same number CAN appear under a
+        # different restaurant — see the comment on `phone`.
+        UniqueConstraint("restaurant_id", "phone", name="uq_users_restaurant_phone"),
+    )
+
+    @property
+    def login_identifier(self) -> str:
+        """What this person types to sign in. Email where they have one."""
+        return self.email or self.phone or ""
 
     # --- Password helpers ----------------------------------------------------
     def set_password(self, raw_password: str) -> None:

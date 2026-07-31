@@ -14,7 +14,7 @@ from app.schemas.menu import CategoryCreate, CategoryUpdate, MenuItemCreate, Men
 
 router = APIRouter(prefix="/api/menu", tags=["menu"])
 
-MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
+MANAGERS = UserRole.MANAGERS
 
 
 def _categories_cache_key(restaurant_id: str) -> str:

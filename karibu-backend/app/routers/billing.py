@@ -21,7 +21,7 @@ from app.services import billing, paystack
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
-MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
+MANAGERS = UserRole.MANAGERS
 
 
 @router.get("/subscription")
@@ -40,7 +40,7 @@ async def pay_now(
     body: PayRequest,
     db: DbDep,
     restaurant: Restaurant = Depends(get_current_restaurant),
-    _owner=Depends(require_roles(UserRole.OWNER)),
+    _manager=Depends(require_roles(*UserRole.MANAGERS)),
 ):
     """Owner-initiated charge (convert trial early / retry). Idempotent."""
     result = await db.execute(

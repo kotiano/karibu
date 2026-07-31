@@ -1,6 +1,6 @@
 """JWT helpers (create/decode) and the API error type.
 
-Tokens embed the same claims as the Flask version: role, branch, rid (tenant),
+Tokens embed the same claims as the Flask version: role, rid (tenant),
 tv (token version), plus a `type` of access/refresh so refresh tokens can't be
 used as access tokens.
 """
@@ -79,7 +79,6 @@ def token_claims(user) -> dict:
     """Standard extra claims embedded in both token types."""
     return {
         "role": user.role,
-        "branch": user.branch_name,
         "rid": user.restaurant_id,
         "tv": user.token_version,
     }

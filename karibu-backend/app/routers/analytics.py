@@ -9,13 +9,16 @@ of orders. The one Python-side pass (daily revenue series) reads bare
 """
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.core.dependencies import DbDep, SubscribedUser
+from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.serializers import order_dict
-from app.models import Debt, DebtStatus, Order, OrderItem, OrderStatus, Payment, User
+from app.models import (
+    Debt, DebtStatus, Order, OrderItem, OrderStatus, Payment, Restaurant, User,
+    UserRole,
+)
 from app.schemas.common import ok
 from app.services.reports import Report, money, render
 
@@ -196,23 +199,37 @@ async def dashboard(user: SubscribedUser, db: DbDep):
     ]
     avg_prep_minutes = round(sum(spans) / len(spans)) if spans else None
 
-    return ok(
-        {
-            "total_sales": round(today_sales / 100, 2),
-            "sales_change_pct": change_pct,
-            "active_orders": active_orders,
-            "completed_orders": completed_today,
-            "live_orders": [order_dict(o, detailed=False) for o in live],
-            "hourly_sales": hourly_sales,
-            "sales_trend": sales_trend,
-            "top_items": top_items,
-            "staff_today": staff_today,
-            "avg_prep_minutes": avg_prep_minutes,
-        }
-    )
+    payload = {
+        "active_orders": active_orders,
+        "completed_orders": completed_today,
+        "live_orders": [order_dict(o, detailed=False) for o in live],
+        "avg_prep_minutes": avg_prep_minutes,
+        # Tells the client which half it is looking at, so it can lay the page
+        # out rather than guess from missing keys.
+        "shows_money": user.role in UserRole.MANAGERS,
+    }
+
+    # THE DASHBOARD IS THE HOME SCREEN FOR EVERY ROLE, so it stays reachable by
+    # a waiter who needs the live order list. What it must not do is hand them
+    # the day's takings, the 12-day trend and every colleague's sales figures.
+    # Those are stripped here rather than hidden in the UI — the API is what
+    # decides who sees money.
+    if user.role in UserRole.MANAGERS:
+        payload.update(
+            {
+                "total_sales": round(today_sales / 100, 2),
+                "sales_change_pct": change_pct,
+                "hourly_sales": hourly_sales,
+                "sales_trend": sales_trend,
+                "top_items": top_items,
+                "staff_today": staff_today,
+            }
+        )
+
+    return ok(payload)
 
 
-@router.get("/sales")
+@router.get("/sales", dependencies=[Depends(require_roles(*UserRole.MANAGERS))])
 async def sales_report(user: SubscribedUser, db: DbDep, days: int = Query(default=7, ge=1, le=90)):
     rid = user.restaurant_id
     window_start = (datetime.utcnow() - timedelta(days=days - 1)).replace(
@@ -289,7 +306,7 @@ async def sales_report(user: SubscribedUser, db: DbDep, days: int = Query(defaul
     )
 
 
-@router.get("/sales.csv")
+@router.get("/sales.csv", dependencies=[Depends(require_roles(*UserRole.MANAGERS))])
 async def sales_csv(
     user: SubscribedUser,
     db: DbDep,
@@ -366,7 +383,7 @@ async def sales_csv(
     )
 
 
-@router.get("/sales.pdf")
+@router.get("/sales.pdf", dependencies=[Depends(require_roles(*UserRole.MANAGERS))])
 async def sales_pdf(
     user: SubscribedUser,
     db: DbDep,
@@ -447,7 +464,11 @@ async def sales_pdf(
         f" ({days} day{'s' if days != 1 else ''})"
     )
 
-    pdf = Report("Sales report", user.branch_name or "Karibu POS", period)
+    # The report is headed with the restaurant's real name. It used to use
+    # a free-text per-user "branch" label, which nothing scoped by.
+    restaurant = await db.get(Restaurant, user.restaurant_id)
+    restaurant_name = restaurant.name if restaurant else "Karibu POS"
+    pdf = Report("Sales report", restaurant_name, period)
     pdf.alias_nb_pages()
     pdf.add_page()
 
@@ -502,7 +523,7 @@ async def sales_pdf(
     )
 
 
-@router.get("/accountability")
+@router.get("/accountability", dependencies=[Depends(require_roles(*UserRole.MANAGERS))])
 async def accountability(
     user: SubscribedUser,
     db: DbDep,

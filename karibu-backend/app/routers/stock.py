@@ -23,7 +23,7 @@ from app.schemas.stock import MovementCreate, StockItemCreate, StockItemUpdate, 
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
 
-MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
+MANAGERS = UserRole.MANAGERS
 
 
 def _item_dict(item: StockItem) -> dict:

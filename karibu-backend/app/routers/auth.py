@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Request
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.core.audit import record_audit
 from app.core.config import settings
@@ -25,6 +25,7 @@ from app.core.security import (
 from app.core.serializers import subscription_dict
 from app.models import AuditAction, Restaurant, Subscription, User, UserRole
 from app.schemas.auth import (
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
@@ -139,8 +140,7 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
         full_name=body.full_name.strip(),
         email=email,
         phone=body.phone,
-        role=UserRole.OWNER,
-        branch_name=body.branch_name or "Main Branch",
+        role=UserRole.MANAGER,
         restaurant_id=restaurant.id,
     )
     user.set_password(body.password)
@@ -193,37 +193,62 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
 @router.post("/login")
 @limiter.limit(settings.RATELIMIT_LOGIN)
 async def login(request: Request, body: LoginRequest, db: DbDep):
-    """Authenticate with email + password."""
-    email = body.email.strip().lower()
+    """Authenticate with an email address OR a phone number, plus a password.
 
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
+    Staff created by a manager may have no email at all — a waiter with only a
+    phone is the normal case, not the exception — so the identifier is matched
+    against both columns.
+    """
+    identifier = body.identifier.strip()
 
-    # Uniform error + always hash to avoid leaking which emails exist.
-    if not user:
+    # Email is stored lowercased; phone is not, so the two are matched
+    # differently rather than with one normalised comparison.
+    result = await db.execute(
+        select(User).where(
+            or_(User.email == identifier.lower(), User.phone == identifier)
+        )
+    )
+    candidates = list(result.scalars().all())
+
+    # A PHONE CAN MATCH MORE THAN ONE ACCOUNT, by design: it is unique per
+    # restaurant, not globally, so the same person can work two jobs. The
+    # identifier alone therefore does not name a user, and the password is what
+    # picks between them. Emails are globally unique, so that path always
+    # yields at most one candidate and this loop runs once.
+    user = next((c for c in candidates if c.check_password(body.password)), None)
+
+    # Uniform error + always hash to avoid leaking which accounts exist.
+    if not candidates:
         User().set_password(body.password)
         raise APIError("Invalid email or password", status=401)
 
-    # Account-level lockout: stops brute force even from rotating IPs.
     now = datetime.utcnow()
+
+    if user is None:
+        # Nothing matched the password. Count the attempt against EVERY account
+        # that shares this identifier — an attacker guessing at a phone number
+        # is attacking all of them, and charging only one would leave the rest
+        # unprotected.
+        for c in candidates:
+            c.failed_logins += 1
+            if c.failed_logins >= settings.LOGIN_LOCKOUT_THRESHOLD:
+                c.locked_until = now + timedelta(minutes=settings.LOGIN_LOCKOUT_MINUTES)
+                c.failed_logins = 0
+        await db.commit()
+        raise APIError("Invalid email or password", status=401)
+    # Account-level lockout: stops brute force even from rotating IPs. Checked
+    # after the password so it applies to the account that actually matched.
     if user.locked_until and now < user.locked_until:
         raise APIError(
             "Too many failed attempts. Try again in a few minutes.", status=429
         )
-
-    if not user.check_password(body.password):
-        user.failed_logins += 1
-        if user.failed_logins >= settings.LOGIN_LOCKOUT_THRESHOLD:
-            user.locked_until = now + timedelta(minutes=settings.LOGIN_LOCKOUT_MINUTES)
-            user.failed_logins = 0
-        await db.commit()
-        raise APIError("Invalid email or password", status=401)
     if not user.is_active:
         raise APIError("This account has been disabled", status=403)
 
     # Email ownership must be confirmed before first login. Platform admins
-    # (created via CLI) are exempt.
-    if not user.email_confirmed and not user.is_platform_admin:
+    # (created via CLI) are exempt, and so is anyone with no email — a manager
+    # vouched for them by creating the account, and there is no inbox to check.
+    if user.email and not user.email_confirmed and not user.is_platform_admin:
         raise APIError(
             "Please verify your email first. Check your inbox for the code.",
             status=403,
@@ -486,8 +511,6 @@ async def update_me(body: UpdateProfileRequest, user: CurrentUser, db: DbDep):
         user.phone = body.phone
     if body.avatar_url is not None:
         user.avatar_url = body.avatar_url
-    if body.branch_name is not None:
-        user.branch_name = body.branch_name
     if body.password:
         # Changing a password requires proving knowledge of the current one —
         # a valid session token alone must not be enough to reset it.
@@ -512,3 +535,55 @@ async def update_me(body: UpdateProfileRequest, user: CurrentUser, db: DbDep):
     await db.commit()
     await db.refresh(user)
     return ok({"user": UserOut.model_validate(user).model_dump()}, message="Profile updated")
+
+
+@router.post("/change-password")
+@limiter.limit("10/minute")
+async def change_password(
+    request: Request, body: ChangePasswordRequest, user: CurrentUser, db: DbDep
+):
+    """Set a new password, proving the current one.
+
+    Takes CurrentUser, NOT SubscribedUser — deliberately the only business
+    endpoint that does. A staff member holding a temporary code must be able to
+    reach exactly this and nothing else, and gating it behind the subscription
+    check would also lock them out whenever billing lapses, which is not their
+    problem to fix.
+    """
+    if not user.check_password(body.current_password):
+        raise APIError(
+            "That isn't your current password.",
+            status=422, errors={"current_password": "wrong"},
+        )
+    problem = password_problem(body.new_password)
+    if problem:
+        raise APIError(problem, status=422, errors={"new_password": problem})
+    if body.new_password == body.current_password:
+        raise APIError(
+            "Choose a password you haven't just used.",
+            status=422, errors={"new_password": "unchanged"},
+        )
+
+    user.set_password(body.new_password)
+    user.must_change_password = False
+    # Every other session dies, including any the manager may have opened with
+    # the temporary code they issued.
+    user.token_version += 1
+
+    await record_audit(
+        db,
+        action=AuditAction.PASSWORD_CHANGED,
+        summary=f"{user.login_identifier} changed their password",
+        actor_id=user.id,
+        actor_email=user.email,
+        restaurant_id=user.restaurant_id,
+        request=request,
+    )
+    await db.commit()
+    await db.refresh(user)
+
+    # Fresh tokens, because the version bump just invalidated the caller's own.
+    return ok(
+        {"user": UserOut.model_validate(user).model_dump(), "tokens": _issue_tokens(user)},
+        message="Password updated.",
+    )

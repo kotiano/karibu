@@ -88,8 +88,7 @@ async def main() -> int:
         user = User(
             full_name=args.name,
             email=email,
-            role=UserRole.OWNER,
-            branch_name="HQ",
+            role=UserRole.MANAGER,
             restaurant_id=hq.id,
             is_platform_admin=True,
         )

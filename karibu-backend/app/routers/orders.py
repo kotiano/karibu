@@ -1,11 +1,11 @@
 """Order routes — the heart of the POS. Tenant-scoped + subscription-gated."""
 import random
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.core.dependencies import DbDep, SubscribedUser
+from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.security import APIError
 from app.core.serializers import order_dict
 from app.models import (
@@ -26,7 +26,7 @@ from app.schemas.order import DebtPaymentIn, OrderCreate, OrderPaymentIn, Status
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 
-MANAGERS = (UserRole.OWNER, UserRole.MANAGER)
+MANAGERS = UserRole.MANAGERS
 
 
 async def _generate_reference(db) -> str:
@@ -164,7 +164,10 @@ async def update_status(order_id: str, body: StatusUpdate, user: SubscribedUser,
     return ok(order_dict(order), message=f"Order marked {body.status}")
 
 
-@router.post("/{order_id}/payments", status_code=201)
+# Taking money is cashier and above. A waiter carries plates; letting them
+# also close bills removes the only separation this restaurant has.
+@router.post("/{order_id}/payments", status_code=201,
+             dependencies=[Depends(require_roles(*UserRole.HANDLES_MONEY))])
 async def record_payment(order_id: str, body: OrderPaymentIn, user: SubscribedUser, db: DbDep):
     order = await _get_scoped_order(db, order_id, user.restaurant_id)
     amount_cents = int(round(body.amount * 100))
@@ -244,7 +247,10 @@ async def record_payment(order_id: str, body: OrderPaymentIn, user: SubscribedUs
     return ok(order_dict(order), message="Payment recorded")
 
 
-@router.delete("/{order_id}")
+# VOIDING IS MANAGER-ONLY. Cancelling a paid order is the standard way till
+# theft is covered up, and restricting it is most of the reason the
+# accountability ledger is worth keeping.
+@router.delete("/{order_id}", dependencies=[Depends(require_roles(*MANAGERS))])
 async def cancel_order(order_id: str, user: SubscribedUser, db: DbDep):
     order = await _get_scoped_order(db, order_id, user.restaurant_id)
     if order.payment_status == PaymentStatus.PAID:
