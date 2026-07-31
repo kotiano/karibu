@@ -50,6 +50,16 @@ class Debt(BaseModel):
     )
     settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # WHO PUT THIS ON CREDIT. The order already records who served it; this
+    # records who made the decision to let it leave unpaid, which is the one
+    # that has to be answerable when it is never settled. They are usually the
+    # same person and occasionally are not — a waiter takes the order, a manager
+    # approves the credit — and the difference is exactly what gets argued about.
+    recorded_by_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    recorded_by: Mapped["User | None"] = relationship()  # noqa: F821
+
     created_at_idx: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False, index=True
     )

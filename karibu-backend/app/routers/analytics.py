@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import DbDep, SubscribedUser
 from app.core.serializers import order_dict
-from app.models import Order, OrderItem, OrderStatus, Payment, User
+from app.models import Debt, DebtStatus, Order, OrderItem, OrderStatus, Payment, User
 from app.schemas.common import ok
 from app.services.reports import Report, money, render
 
@@ -499,4 +499,122 @@ async def sales_pdf(
         content=render(pdf),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/accountability")
+async def accountability(
+    user: SubscribedUser,
+    db: DbDep,
+    days: int = Query(default=30, ge=1, le=366),
+):
+    """Who is carrying unpaid money, by name.
+
+    Two different exposures per person, kept apart on purpose:
+
+      UNPAID ORDERS  — served, still not fully paid, not cancelled. Often just
+                       a table still eating; only a worry once it is old.
+      CREDIT GIVEN   — debts they authorised that are still outstanding. This
+                       is the deliberate decision to let food leave unpaid, and
+                       it is the number an owner actually wants a name against.
+
+    Summing them into one "owed" figure would merge a table mid-service with a
+    customer who has not paid in three weeks, and the whole point is to tell
+    those apart.
+    """
+    rid = user.restaurant_id
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Outstanding credit PER ORDER, needed before the unpaid pass.
+    #
+    # Settling an order as credit deliberately creates a Debt and no Payment —
+    # credit is not revenue until collected — so the order's amount_paid stays
+    # at zero. Without subtracting it here the same money is reported twice:
+    # once as an unpaid order and again as outstanding credit, and the two
+    # columns this endpoint exists to separate would both contain it.
+    credit_res = await db.execute(
+        select(Debt.order_id, func.sum(Debt.amount_cents - Debt.paid_cents))
+        .where(Debt.restaurant_id == rid, Debt.status == DebtStatus.OUTSTANDING)
+        .group_by(Debt.order_id)
+    )
+    credit_on_order = {oid: cents or 0 for oid, cents in credit_res.all()}
+
+    # Unpaid orders per server. amount_paid_cents is a Python property, so the
+    # shortfall is computed from the columns rather than filtered in SQL.
+    orders_res = await db.execute(
+        select(Order)
+        .where(
+            Order.restaurant_id == rid,
+            Order.created_at >= since,
+            Order.status != OrderStatus.CANCELLED,
+        )
+        .options(selectinload(Order.payments), selectinload(Order.server))
+    )
+    people: dict[str, dict] = {}
+
+    def slot(name: str | None) -> dict:
+        # Orders predating server tracking have no name. They are grouped
+        # honestly rather than dropped — a total that silently excludes them
+        # would not reconcile against the debts page.
+        key = name or "Unattributed"
+        return people.setdefault(
+            key,
+            {
+                "name": key,
+                "orders_served": 0,
+                "sales": 0,
+                "unpaid_orders": 0,
+                "unpaid_value": 0,
+                "credit_given": 0,
+                "credit_outstanding": 0,
+            },
+        )
+
+    for o in orders_res.scalars().all():
+        row = slot(o.server.full_name if o.server else None)
+        row["orders_served"] += 1
+        row["sales"] += o.amount_paid_cents
+        shortfall = o.total_cents - o.amount_paid_cents - credit_on_order.get(o.id, 0)
+        if shortfall > 0:
+            row["unpaid_orders"] += 1
+            row["unpaid_value"] += shortfall
+
+    debts_res = await db.execute(
+        select(Debt)
+        .where(Debt.restaurant_id == rid, Debt.created_at_idx >= since)
+        .options(
+            selectinload(Debt.recorded_by),
+            selectinload(Debt.order).selectinload(Order.server),
+        )
+    )
+    for d in debts_res.scalars().all():
+        # Attributed to whoever authorised the credit, falling back to whoever
+        # served the order for debts created before that was recorded.
+        who = (
+            d.recorded_by.full_name
+            if d.recorded_by
+            else (d.order.server.full_name if d.order and d.order.server else None)
+        )
+        row = slot(who)
+        row["credit_given"] += 1
+        row["credit_outstanding"] += d.outstanding_cents
+
+    rows = sorted(
+        people.values(),
+        key=lambda r: (r["credit_outstanding"], r["unpaid_value"]),
+        reverse=True,
+    )
+    for r in rows:
+        for money_key in ("sales", "unpaid_value", "credit_outstanding"):
+            r[money_key] = round(r[money_key] / 100, 2)
+
+    return ok(
+        {
+            "range_days": days,
+            "staff": rows,
+            "total_unpaid": round(sum(r["unpaid_value"] for r in rows), 2),
+            "total_credit_outstanding": round(
+                sum(r["credit_outstanding"] for r in rows), 2
+            ),
+        }
     )

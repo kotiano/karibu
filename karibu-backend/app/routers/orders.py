@@ -206,6 +206,10 @@ async def record_payment(order_id: str, body: OrderPaymentIn, user: SubscribedUs
                 customer_phone=body.customer_phone,
                 amount_cents=amount_cents,
                 due_date=body.due_date,
+                # Whoever authorised the credit. The order already records who
+                # served it; this records who let it leave unpaid, which is the
+                # one that has to be answerable when it is never settled.
+                recorded_by_id=user.id,
             )
         )
     elif body.method in (PaymentMethod.CASH, PaymentMethod.MPESA, PaymentMethod.CARD):

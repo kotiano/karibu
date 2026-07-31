@@ -40,6 +40,8 @@ def _debt_dict(d: Debt) -> dict:
         "due_date": d.due_date,
         "status": d.status,
         "is_overdue": d.is_overdue,
+        "recorded_by": d.recorded_by.full_name if d.recorded_by else None,
+        "served_by": d.order.server.full_name if d.order and d.order.server else None,
         "created_at": d.created_at_idx,
         "settled_at": d.settled_at,
     }
@@ -58,7 +60,10 @@ async def list_debts(
     stmt = (
         select(Debt)
         .where(Debt.restaurant_id == user.restaurant_id)
-        .options(selectinload(Debt.order))
+        .options(
+            selectinload(Debt.order).selectinload(Order.server),
+            selectinload(Debt.recorded_by),
+        )
         .order_by(Debt.due_date.is_(None), Debt.due_date.asc(), Debt.created_at_idx.desc())
     )
     if status == "outstanding":
@@ -113,7 +118,10 @@ async def pay_debt(debt_id: str, body: DebtPaymentIn, user: SubscribedUser, db: 
         await db.execute(
             select(Debt)
             .where(Debt.id == debt_id, Debt.restaurant_id == user.restaurant_id)
-            .options(selectinload(Debt.order))
+            .options(
+            selectinload(Debt.order).selectinload(Order.server),
+            selectinload(Debt.recorded_by),
+        )
         )
     ).scalar_one_or_none()
     if not debt:

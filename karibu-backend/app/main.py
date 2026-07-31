@@ -31,6 +31,7 @@ from app.routers import (
     billing,
     debts,
     expenses,
+    stock,
     menu,
     orders,
 )
@@ -274,6 +275,7 @@ app.include_router(menu.router)
 app.include_router(orders.router)
 app.include_router(analytics.router)
 app.include_router(expenses.router)
+app.include_router(stock.router)
 
 
 
