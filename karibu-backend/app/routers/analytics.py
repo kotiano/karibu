@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import DbDep, SubscribedUser
 from app.core.serializers import order_dict
-from app.models import Order, OrderItem, OrderStatus, Payment
+from app.models import Order, OrderItem, OrderStatus, Payment, User
 from app.schemas.common import ok
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
@@ -76,6 +76,117 @@ async def dashboard(user: SubscribedUser, db: DbDep):
     )
     live = live_res.scalars().all()
 
+    # ── Hourly takings for today ────────────────────────────────────────────
+    # Bucketed in Python from bare (timestamp, cents) tuples rather than with a
+    # date_trunc, because the expression differs across Postgres and SQLite and
+    # a day of payments is a trivially small read.
+    hourly_res = await db.execute(
+        select(Payment.received_at, Payment.amount_cents)
+        .join(Order, Payment.order_id == Order.id)
+        .where(
+            Order.restaurant_id == rid,
+            Payment.received_at >= today_start,
+            Payment.received_at < today_end,
+        )
+    )
+    buckets: dict[int, int] = {}
+    for received_at, cents in hourly_res.all():
+        buckets[received_at.hour] = buckets.get(received_at.hour, 0) + (cents or 0)
+    # A fixed 7am–9pm window so the chart has a stable x-axis all day instead of
+    # growing a column each hour — and so a quiet hour reads as a quiet hour
+    # rather than vanishing.
+    hourly_sales = [
+        {"hour": h, "amount": round(buckets.get(h, 0) / 100, 2)} for h in range(7, 22)
+    ]
+
+    # ── 12-day trend, for the sparkline ─────────────────────────────────────
+    trend_start = today_start - timedelta(days=11)
+    trend_res = await db.execute(
+        select(Payment.received_at, Payment.amount_cents)
+        .join(Order, Payment.order_id == Order.id)
+        .where(Order.restaurant_id == rid, Payment.received_at >= trend_start)
+    )
+    day_totals: dict[str, int] = {}
+    for received_at, cents in trend_res.all():
+        key = received_at.date().isoformat()
+        day_totals[key] = day_totals.get(key, 0) + (cents or 0)
+    sales_trend = [
+        round(day_totals.get((trend_start + timedelta(days=i)).date().isoformat(), 0) / 100, 2)
+        for i in range(12)
+    ]
+
+    # ── Top items today ─────────────────────────────────────────────────────
+    top_res = await db.execute(
+        select(
+            OrderItem.name_snapshot,
+            func.sum(OrderItem.quantity),
+            func.sum(OrderItem.unit_price_cents * OrderItem.quantity),
+        )
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(
+            Order.restaurant_id == rid,
+            Order.created_at >= today_start,
+            Order.created_at < today_end,
+            Order.status != OrderStatus.CANCELLED,
+        )
+        .group_by(OrderItem.name_snapshot)
+        .order_by(func.sum(OrderItem.quantity).desc())
+        .limit(5)
+    )
+    top_items = [
+        {"name": name, "qty": int(qty or 0), "sales": round((cents or 0) / 100, 2)}
+        for name, qty, cents in top_res.all()
+    ]
+
+    # ── Who served what, today ──────────────────────────────────────────────
+    staff_res = await db.execute(
+        select(
+            User.full_name,
+            User.role,
+            func.count(func.distinct(Order.id)),
+            func.coalesce(func.sum(Payment.amount_cents), 0),
+        )
+        .select_from(Order)
+        .join(User, Order.server_id == User.id)
+        .outerjoin(Payment, Payment.order_id == Order.id)
+        .where(
+            Order.restaurant_id == rid,
+            Order.created_at >= today_start,
+            Order.created_at < today_end,
+            Order.status != OrderStatus.CANCELLED,
+        )
+        .group_by(User.id, User.full_name, User.role)
+        .order_by(func.coalesce(func.sum(Payment.amount_cents), 0).desc())
+        .limit(6)
+    )
+    staff_today = [
+        {
+            "name": name,
+            "role": role,
+            "orders": int(orders or 0),
+            "sales": round((cents or 0) / 100, 2),
+        }
+        for name, role, orders, cents in staff_res.all()
+    ]
+
+    # ── Average time from placed to completed, today ────────────────────────
+    # Returned in minutes, or null when nothing has completed yet — the client
+    # must be able to tell "no data" from "zero minutes".
+    done_res = await db.execute(
+        select(Order.created_at, Order.updated_at).where(
+            Order.restaurant_id == rid,
+            Order.status == OrderStatus.COMPLETED,
+            Order.created_at >= today_start,
+            Order.created_at < today_end,
+        )
+    )
+    spans = [
+        (updated - created).total_seconds() / 60
+        for created, updated in done_res.all()
+        if updated and created and updated >= created
+    ]
+    avg_prep_minutes = round(sum(spans) / len(spans)) if spans else None
+
     return ok(
         {
             "total_sales": round(today_sales / 100, 2),
@@ -83,6 +194,11 @@ async def dashboard(user: SubscribedUser, db: DbDep):
             "active_orders": active_orders,
             "completed_orders": completed_today,
             "live_orders": [order_dict(o, detailed=False) for o in live],
+            "hourly_sales": hourly_sales,
+            "sales_trend": sales_trend,
+            "top_items": top_items,
+            "staff_today": staff_today,
+            "avg_prep_minutes": avg_prep_minutes,
         }
     )
 
