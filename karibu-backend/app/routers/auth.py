@@ -25,8 +25,10 @@ from app.core.security import (
 from app.core.serializers import subscription_dict
 from app.models import AuditAction, Restaurant, Subscription, User, UserRole
 from app.schemas.auth import (
+    ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     UpdateProfileRequest,
     UserOut,
     VerifyEmailRequest,
@@ -347,6 +349,108 @@ async def resend_confirmation(request: Request, body: LoginRequest, db: DbDep):
     await db.commit()
     await _send_confirmation_link(user, code)
     return generic
+
+
+@router.post("/forgot-password")
+@limiter.limit("3/minute")
+async def forgot_password(request: Request, body: ForgotPasswordRequest, db: DbDep):
+    """Email a password reset link.
+
+    ENUMERATION-SAFE. The response is identical whether or not the address is
+    registered, so this endpoint cannot be used to discover which of a list of
+    emails has an account. That is why it does not report "no such user" even
+    though that would be friendlier to the one person who mistyped their own
+    address — the friendlier version hands an attacker a customer list.
+    """
+    email = body.email.strip().lower()
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+
+    generic = ok(
+        message="If that email has an account, a reset link is on its way."
+    )
+    if not user or not user.is_active:
+        return generic
+
+    token = generate_link_token()
+    user.reset_token = hash_link_token(token)
+    # ONE HOUR, not the 24 the confirmation link gets. A reset link is a live
+    # credential for taking over an account; a confirmation link only activates
+    # one that already belongs to whoever holds the inbox.
+    user.reset_token_expires = datetime.utcnow() + timedelta(hours=1)
+    await db.commit()
+
+    url = f"{settings.PUBLIC_WEB_URL.rstrip('/')}/reset-password?token={token}"
+    subject, html, text = email_service.password_reset_link(user.full_name, url)
+    try:
+        await asyncio.wait_for(
+            email_service.send_email(user.email, subject, html, text),
+            timeout=settings.EMAIL_SIGNUP_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Password reset email to %s timed out", user.email)
+    return generic
+
+
+@router.post("/reset-password")
+@limiter.limit("5/minute")
+async def reset_password(request: Request, body: ResetPasswordRequest, db: DbDep):
+    """Set a new password from a reset link."""
+    problem = password_problem(body.password)
+    if problem:
+        raise APIError(problem, status=422, errors={"password": problem})
+
+    # Looked up BY the hash, so the plaintext token is never compared in the
+    # database and no email is needed in the request.
+    token_hash = hash_link_token(body.token)
+    result = await db.execute(select(User).where(User.reset_token == token_hash))
+    user = result.scalar_one_or_none()
+
+    invalid = APIError(
+        "This reset link is invalid or has expired. Request a new one.",
+        status=400,
+    )
+    if not user or not verify_link_token(body.token, user.reset_token):
+        raise invalid
+    if not user.reset_token_expires or user.reset_token_expires < datetime.utcnow():
+        raise invalid
+    if not user.is_active:
+        raise invalid
+
+    user.set_password(body.password)
+    # SINGLE USE. Cleared before commit so a replayed link fails even if the
+    # same request is delivered twice.
+    user.reset_token = None
+    user.reset_token_expires = None
+    # Reaching the inbox proves ownership of the address, so an account still
+    # waiting on confirmation is confirmed here too. Otherwise someone who
+    # never got the signup email but did get this one lands in a state where
+    # they know their password and still cannot sign in.
+    user.email_confirmed = True
+    # EVERY EXISTING SESSION DIES. If the reset is happening because someone
+    # else got in, leaving their access token working until it expires would
+    # make the reset pointless.
+    user.token_version += 1
+    # A password change also clears any lockout — the brute force it was
+    # protecting against is now aimed at a password that no longer exists.
+    user.failed_logins = 0
+    user.locked_until = None
+
+    # Recorded in the SAME transaction as the change itself. Auditing after the
+    # commit means a crash in between leaves a password changed with nothing
+    # saying who changed it — which is the one question an audit log exists to
+    # answer.
+    await record_audit(
+        db,
+        action=AuditAction.PASSWORD_RESET,
+        summary=f"{user.email} reset their password via an emailed link",
+        actor_id=user.id,
+        actor_email=user.email,
+        restaurant_id=user.restaurant_id,
+        request=request,
+    )
+    await db.commit()
+    return ok(message="Password updated. Sign in with your new password.")
 
 
 @router.post("/refresh")

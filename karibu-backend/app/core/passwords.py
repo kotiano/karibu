@@ -33,12 +33,52 @@ COMMON_PASSWORDS: frozenset[str] = frozenset(
 )
 
 
+# The composition rules the signup form shows as a live checklist.
+#
+# THIS LIST IS THE AUTHORITY, and the web app mirrors it exactly. A checklist
+# the client enforces alone is decoration: anything that can POST straight to
+# the API skips it entirely, so a rule the server does not also apply is not a
+# rule. The wording is shared too — a field that ticks green and is then
+# rejected by the server with different words reads as a broken form.
+SPECIAL_CHARACTERS = "!@#$%^&*()-_=+[]{};:,.<>?/\\|`~\"'"
+
+PASSWORD_RULES: tuple[tuple[str, str], ...] = (
+    ("length", "At least 8 characters"),
+    ("lower", "One lowercase letter"),
+    ("upper", "One uppercase letter"),
+    ("digit", "One number"),
+    ("special", "One special character"),
+)
+
+
+def failed_password_rules(password: str) -> list[str]:
+    """Which of PASSWORD_RULES the password does not satisfy, by id."""
+    failed = []
+    if len(password) < 8:
+        failed.append("length")
+    if not any(c.islower() for c in password):
+        failed.append("lower")
+    if not any(c.isupper() for c in password):
+        failed.append("upper")
+    if not any(c.isdigit() for c in password):
+        failed.append("digit")
+    if not any(c in SPECIAL_CHARACTERS for c in password):
+        failed.append("special")
+    return failed
+
+
 def password_problem(password: str) -> str | None:
     """Return a human-readable problem with the password, or None if OK.
 
-    The 8-char minimum is enforced by the Pydantic schema; this adds the
-    quality checks on top.
+    Composition rules first, then the quality checks — a password that is too
+    short should be told so rather than being told it is too common.
     """
+    labels = dict(PASSWORD_RULES)
+    missing = failed_password_rules(password)
+    if missing:
+        needed = [labels[r].lower() for r in missing]
+        return "Password needs " + ", ".join(needed) + "."
+
     lowered = password.lower()
     if lowered in COMMON_PASSWORDS:
         return "That password is too common — pick something less guessable."

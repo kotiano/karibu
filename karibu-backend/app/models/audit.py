@@ -24,6 +24,11 @@ class AuditAction:
     USER_LOGIN = "user.login"
     EMAIL_CONFIRMED = "user.email_confirmed"
     PASSWORD_CHANGED = "user.password_changed"
+    # Distinct from PASSWORD_CHANGED on purpose: that one is made by someone
+    # already signed in and proving the old password, this one by whoever holds
+    # the inbox. When an account is disputed, which of the two happened is the
+    # whole question.
+    PASSWORD_RESET = "user.password_reset"
     STAFF_CREATED = "user.staff_created"
     STAFF_DEACTIVATED = "user.staff_deactivated"
 

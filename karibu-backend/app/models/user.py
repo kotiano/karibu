@@ -81,6 +81,18 @@ class User(BaseModel):
         Integer, default=0, nullable=False
     )
 
+    # Password reset. A SEPARATE pair from the email_token columns above, not a
+    # reuse of them: the two links grant different things, and sharing one slot
+    # would mean requesting a reset silently invalidates a pending signup
+    # confirmation (and the reverse). Same sha256-at-rest treatment — a database
+    # leak must not hand over a working reset link.
+    reset_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    reset_token_expires: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
     orders: Mapped[list["Order"]] = relationship(back_populates="server")
 
     # --- Password helpers ----------------------------------------------------

@@ -38,6 +38,37 @@ from app.routers import (
 logger = logging.getLogger("karibu")
 
 
+def _configure_logging() -> None:
+    """Give the app's own loggers somewhere to write.
+
+    Nothing did this before, so the root logger had no handler and every
+    `karibu.*` logger sat at the default WARNING. Every logger.info in the
+    codebase was being discarded — including the console email fallback, whose
+    whole job is to print the confirmation and reset links when no mail
+    transport is configured.
+
+    The effect was that "development needs zero setup" was false in the one way
+    that matters: a developer with no SMTP could register an account and never
+    see the link, with nothing in the output to say why. It only ever worked
+    under pytest, which attaches its own handler.
+
+    Configured on the "karibu" namespace rather than the root so this cannot
+    fight uvicorn's own logging, and propagate is left off to avoid duplicate
+    lines when a host has already set up a root handler.
+    """
+    app_logger = logging.getLogger("karibu")
+    if app_logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+    app_logger.addHandler(handler)
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
+
+
+_configure_logging()
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail fast if we're in production with placeholder secrets — refusing to

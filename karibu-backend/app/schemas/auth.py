@@ -32,6 +32,21 @@ class VerifyEmailRequest(BaseModel):
     token: str = Field(min_length=20, max_length=200)
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """The token from a reset link, plus the new password.
+
+    No email field, for the same reason as VerifyEmailRequest: the token alone
+    identifies the account, and asking for an address as well would turn this
+    into an oracle for which addresses are registered.
+    """
+    token: str = Field(min_length=20, max_length=200)
+    password: str = Field(min_length=8, max_length=128)
+
+
 class UpdateProfileRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=120)
     phone: str | None = None

@@ -359,6 +359,40 @@ def confirm_email_link(full_name: str, url: str) -> tuple[str, str, str]:
     return subject, html, text
 
 
+def password_reset_link(full_name: str, url: str) -> tuple[str, str, str]:
+    """The password reset email.
+
+    Says plainly that ignoring it leaves the password unchanged. Someone who
+    did not request this needs to know that doing nothing is safe — otherwise
+    the email itself reads as the attack, and a worried owner starts clicking
+    to "cancel" it.
+    """
+    subject = "Reset your password · Karibu POS"
+    html = _wrap(
+        "Reset your password",
+        f"""<p style="color:#3a3a3a;font-size:15px;line-height:1.6;">
+        Hi {full_name}, we received a request to reset your Karibu POS
+        password. Click the button below to choose a new one.</p>
+        <p style="margin:28px 0;">{_button(url, "Choose a new password")}</p>
+        <p style="color:#8a8a8a;font-size:13px;line-height:1.6;">
+        Or paste this into your browser:<br>
+        <span style="word-break:break-all;color:#005C39;">{url}</span></p>
+        <p style="color:#8a8a8a;font-size:13px;line-height:1.6;">
+        This link expires in 1 hour and can only be used once. If you didn't
+        ask for this, you can safely ignore this email — your password will not
+        change.</p>""",
+    )
+    text = (
+        f"Hi {full_name},\n\n"
+        f"We received a request to reset your Karibu POS password.\n"
+        f"Choose a new one here:\n{url}\n\n"
+        f"This link expires in 1 hour and can only be used once.\n"
+        f"If you didn't ask for this, ignore this email — your password will "
+        f"not change."
+    )
+    return subject, html, text
+
+
 def payment_failed(full_name: str, retry_when: str, pay_url: str) -> tuple[str, str, str]:
     subject = "Payment failed — action needed · Karibu POS"
     html = _wrap(
