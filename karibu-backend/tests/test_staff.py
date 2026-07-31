@@ -237,3 +237,31 @@ def test_staff_appear_in_the_accountability_report(client, owner, waiter):
     row = next((r for r in report["staff"] if r["name"] == "Otieno"), None)
     assert row is not None, "a waiter's unpaid order must be attributed to them"
     assert row["unpaid_orders"] == 1
+
+
+def test_lower_ranks_can_read_the_menu_but_not_change_it(client, owner, waiter, cashier):
+    """A waiter needs the menu to take an order and must not be able to edit it.
+
+    Reading and writing are deliberately different here: hiding "Manage menu"
+    from the sidebar is presentation, and the API is what decides.
+    """
+    for headers in (waiter, cashier):
+        # Reading is part of the job.
+        assert client.get("/api/menu/categories", headers=headers).status_code == 200
+        assert client.get("/api/menu/items", headers=headers).status_code == 200
+
+        # Changing it is not — prices especially.
+        assert client.post("/api/menu/categories", json={"name": "Sneaky"},
+                           headers=headers).status_code == 403
+        assert client.post("/api/menu/items", json={
+            "name": "Free Lunch", "price": 1, "category_id": owner["category"]["id"],
+        }, headers=headers).status_code == 403
+        assert client.patch(f"/api/menu/items/{owner['item']['id']}", json={"price": 1},
+                            headers=headers).status_code == 403
+        assert client.delete(f"/api/menu/items/{owner['item']['id']}",
+                             headers=headers).status_code == 403
+
+    # The item survived every attempt.
+    item = client.get(f"/api/menu/items/{owner['item']['id']}",
+                      headers=owner["headers"]).json()["data"]
+    assert item["price"] == 500

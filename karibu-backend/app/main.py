@@ -84,10 +84,19 @@ async def lifespan(app: FastAPI):
 
         await asyncio.to_thread(diagnose_smtp)
 
-    # Dev convenience: create tables if they don't exist. In production use
-    # Alembic migrations instead.
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Dev convenience only. NEVER in production, where Alembic owns the schema.
+    #
+    # create_all builds tables from the models and does NOT write
+    # alembic_version, so on a fresh production database it produces a schema
+    # that Alembic then believes is un-migrated: `alembic upgrade head` fails on
+    # the initial revision with "relation already exists", and the fix is no
+    # longer obvious. Worse, it silently papers over a migration someone forgot
+    # to write — the models and the migration history drift apart, and the
+    # difference only surfaces on the next deploy to a database that was built
+    # properly.
+    if settings.ENV != "production":
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     scheduler = _maybe_start_scheduler()
     try:
