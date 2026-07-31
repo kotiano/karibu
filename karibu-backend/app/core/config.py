@@ -137,12 +137,16 @@ class Settings(BaseSettings):
 
     # Base URL of the API (used for links in outgoing emails).
     PUBLIC_API_URL: str = "http://localhost:8000"
-    # How long a signup email-verification code stays valid, and how many
-    # wrong guesses are allowed before it's invalidated and must be resent.
-    # Short + attempt-capped because, unlike the old link token, a 6-digit
-    # code is guessable — it must not stay valid long enough to brute force.
-    EMAIL_OTP_MINUTES: int = 15
-    EMAIL_OTP_MAX_ATTEMPTS: int = 5
+    # Base URL of the WEB APP. Confirmation links point here, not at the API —
+    # the user must land on a page that can sign them in, not on a JSON
+    # response. Set this to the Vercel deployment in production; a wrong value
+    # produces links that 404 and blocks every new signup.
+    PUBLIC_WEB_URL: str = "http://localhost:3000"
+    # How long a confirmation link stays valid. Hours rather than minutes: the
+    # token carries 256 bits of entropy and cannot be guessed, so the short
+    # window a 6-digit code needed does not apply — and a link that dies while
+    # someone is still finding the email just blocks the signup.
+    EMAIL_LINK_HOURS: int = 24
 
     # Postgres connection pool (ignored on SQLite).
     DB_POOL_SIZE: int = 10

@@ -24,8 +24,12 @@ class LoginRequest(BaseModel):
 
 
 class VerifyEmailRequest(BaseModel):
-    email: EmailStr
-    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+    """The token from a confirmation link.
+
+    No email field: the token alone identifies the account, so asking for an
+    email as well would let someone probe which addresses are registered.
+    """
+    token: str = Field(min_length=20, max_length=200)
 
 
 class UpdateProfileRequest(BaseModel):

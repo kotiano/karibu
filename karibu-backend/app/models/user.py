@@ -62,10 +62,15 @@ class User(BaseModel):
     email_confirmed: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
-    # Holds a sha256 hash of the active 6-digit verification code (never the
-    # code itself) plus its expiry and how many wrong guesses have been made
-    # against it. `attempts` caps brute-forcing a short numeric code — once it
-    # hits EMAIL_OTP_MAX_ATTEMPTS the code is dead and a fresh one must be sent.
+    # sha256 hash of the active email-confirmation token (never the token
+    # itself, so a database leak yields no working link) plus its expiry.
+    # sha256 hex is exactly 64 characters, which is why this column is
+    # String(64).
+    #
+    # `attempts` is a leftover from the 6-digit-code era and is no longer
+    # incremented: a 256-bit token cannot be brute-forced, so there is nothing
+    # for an attempt cap to protect. Kept rather than migrated away because
+    # dropping a column earns nothing here.
     email_token: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
     )

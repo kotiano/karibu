@@ -87,18 +87,27 @@ def token_claims(user) -> dict:
 
 # --- Email verification codes ------------------------------------------------
 # A 6-digit OTP sent by email at signup, in place of a clickable link — the
-# link required leaving the app for a browser; a code can be typed straight
-# back in. Only ever store/compare the hash: the DB never holds the code
-# itself, and comparison is constant-time so timing can't leak a partial match.
-def generate_otp_code() -> str:
-    return f"{_secrets.randbelow(1_000_000):06d}"
+# --- Email confirmation link tokens ----------------------------------------
+# The web app confirms an email by clicking a link, not by typing a code. That
+# changes the threat model completely: a 6-digit code has a million
+# possibilities and needs an attempt cap to survive, whereas this is 256 bits of
+# entropy and cannot be guessed, so no attempt counter is needed and a longer
+# expiry is safe.
+#
+# Only the sha256 hash is stored. A database leak must not hand the attacker a
+# working confirmation link, and sha256 hex is exactly 64 characters — the width
+# the email_token column already has.
+def generate_link_token() -> str:
+    """A URL-safe token to embed in a confirmation link. Never stored as-is."""
+    return _secrets.token_urlsafe(32)
 
 
-def hash_otp_code(code: str) -> str:
-    return hashlib.sha256(code.strip().encode()).hexdigest()
+def hash_link_token(token: str) -> str:
+    return hashlib.sha256(token.strip().encode()).hexdigest()
 
 
-def verify_otp_code(code: str, code_hash: str | None) -> bool:
-    if not code_hash or not code:
+def verify_link_token(token: str, token_hash: str | None) -> bool:
+    if not token_hash or not token:
         return False
-    return hmac.compare_digest(hash_otp_code(code), code_hash)
+    # Constant-time, so response timing can't reveal a partial match.
+    return hmac.compare_digest(hash_link_token(token), token_hash)

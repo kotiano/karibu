@@ -330,26 +330,31 @@ def _button(url: str, label: str) -> str:
 
 
 # --- Templates --------------------------------------------------------------
-def confirm_email_code(full_name: str, code: str) -> tuple[str, str, str]:
-    subject = "Your Karibu POS verification code"
+def confirm_email_link(full_name: str, url: str) -> tuple[str, str, str]:
+    """The signup confirmation email.
+
+    A single obvious action. The raw URL is repeated underneath because some
+    mail clients strip or rewrite buttons, and a user who can't click still
+    needs a way in.
+    """
+    subject = "Confirm your email · Karibu POS"
     html = _wrap(
         "Confirm your email",
         f"""<p style="color:#3a3a3a;font-size:15px;line-height:1.6;">
-        Hi {full_name}, welcome to Karibu POS! Enter this code in the app to
+        Hi {full_name}, welcome to Karibu POS! Click the button below to
         confirm your email address and activate your account.</p>
-        <p style="margin:24px 0;font-size:32px;font-weight:bold;letter-spacing:8px;
-        background:#F4F2EC;padding:16px 20px;border-radius:8px;text-align:center;">
-        {code}</p>
+        <p style="margin:28px 0;">{_button(url, "Confirm my email")}</p>
         <p style="color:#8a8a8a;font-size:13px;line-height:1.6;">
-        This code expires in {settings.EMAIL_OTP_MINUTES} minutes. If you didn't
-        create a Karibu POS account, you can ignore this email.</p>""",
+        Or paste this into your browser:<br>
+        <span style="word-break:break-all;color:#005C39;">{url}</span></p>
+        <p style="color:#8a8a8a;font-size:13px;line-height:1.6;">
+        This link expires in 24 hours. If you didn't create a Karibu POS
+        account, you can ignore this email.</p>""",
     )
     text = (
         f"Hi {full_name}, welcome to Karibu POS!\n\n"
-        f"Your verification code is: {code}\n\n"
-        f"Enter it in the app to activate your account. This code expires in "
-        f"{settings.EMAIL_OTP_MINUTES} minutes. If you didn't sign up, ignore "
-        f"this email."
+        f"Confirm your email address to activate your account:\n{url}\n\n"
+        f"This link expires in 24 hours. If you didn't sign up, ignore this email."
     )
     return subject, html, text
 

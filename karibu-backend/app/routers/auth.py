@@ -17,10 +17,10 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    generate_otp_code,
-    hash_otp_code,
+    generate_link_token,
+    hash_link_token,
     token_claims,
-    verify_otp_code,
+    verify_link_token,
 )
 from app.core.serializers import subscription_dict
 from app.models import AuditAction, Restaurant, Subscription, User, UserRole
@@ -38,28 +38,26 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger("karibu.auth")
 
 
-def _new_otp() -> tuple[str, str, datetime]:
-    """Return (plaintext code, hash to store, expiry). Only the hash is persisted."""
-    code = generate_otp_code()
-    expires = datetime.utcnow() + timedelta(minutes=settings.EMAIL_OTP_MINUTES)
-    return code, hash_otp_code(code), expires
-
-
-def _set_otp(user: User) -> str:
-    code, code_hash, expires = _new_otp()
-    user.email_token = code_hash
-    user.email_token_expires = expires
+def _set_confirmation_token(user: User) -> str:
+    """Issue a fresh confirmation token. Returns the plaintext; stores only the
+    hash, so a database leak never yields a working confirmation link."""
+    token = generate_link_token()
+    user.email_token = hash_link_token(token)
+    user.email_token_expires = datetime.utcnow() + timedelta(
+        hours=settings.EMAIL_LINK_HOURS
+    )
     user.email_token_attempts = 0
-    return code
+    return token
 
 
-async def _send_confirmation_code(user: User, code: str) -> bool:
+async def _send_confirmation_link(user: User, code: str) -> bool:
     """Email the code, bounded by EMAIL_SIGNUP_DEADLINE_SECONDS.
 
     Returns whether it was actually delivered. A blocked or slow mail server
     must never hold the signup response longer than a mobile client will wait.
     """
-    subject, html, text = email_service.confirm_email_code(user.full_name, code)
+    url = f"{settings.PUBLIC_WEB_URL.rstrip('/')}/verify?token={code}"
+    subject, html, text = email_service.confirm_email_link(user.full_name, url)
     try:
         sent = await asyncio.wait_for(
             email_service.send_email(user.email, subject, html, text),
@@ -110,9 +108,9 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
         # (409), with no hint that /resend-confirmation is the way out. Treat
         # it as a resend instead, which makes signup safely idempotent.
         if not existing.email_confirmed and existing.check_password(body.password):
-            code = _set_otp(existing)
+            code = _set_confirmation_token(existing)
             await db.commit()
-            sent = await _send_confirmation_code(existing, code)
+            sent = await _send_confirmation_link(existing, code)
             return ok(
                 {
                     "email": existing.email,
@@ -145,7 +143,7 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
     )
     user.set_password(body.password)
     # Email starts unconfirmed; login is blocked until the code is verified.
-    code = _set_otp(user)
+    code = _set_confirmation_token(user)
     db.add(user)
 
     billing_phone = body.billing_phone or body.phone
@@ -165,7 +163,7 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
     await db.refresh(user)
 
     # Fire the verification code email (console-logged in dev).
-    sent = await _send_confirmation_code(user, code)
+    sent = await _send_confirmation_link(user, code)
 
     # No login tokens — the account must verify its email code first.
     # `email_sent` lets the client tell "check your inbox" apart from "we
@@ -262,53 +260,44 @@ async def login(request: Request, body: LoginRequest, db: DbDep):
 
 
 @router.post("/verify-email")
-@limiter.limit("10/minute")
+@limiter.limit("20/minute")
 async def verify_email(request: Request, body: VerifyEmailRequest, db: DbDep):
-    """Confirm an email with the 6-digit code sent at signup (or resend).
+    """Confirm an email from the link sent at signup, and sign the user in.
 
-    Verified in-app rather than via a clicked link. Wrong attempts are counted
-    on the account itself — after EMAIL_OTP_MAX_ATTEMPTS the code is dead
-    regardless of the caller's IP, closing the "just try from another IP"
-    brute-force gap that a pure per-IP rate limit would leave open.
+    The token is looked up by its HASH — the plaintext is never stored, so a
+    leaked database yields no usable link. No attempt counter here, unlike the
+    old 6-digit code: 256 bits of entropy is not brute-forceable, and the
+    per-IP limit above is only there to stop someone hammering the endpoint.
+
+    Signing the user in on success is the whole point of using a link. Making
+    them click through and then type their password again would waste the trust
+    the click already established.
     """
-    email = body.email.strip().lower()
-    result = await db.execute(select(User).where(User.email == email))
+    token = body.token.strip()
+    result = await db.execute(
+        select(User).where(User.email_token == hash_link_token(token))
+    )
     user = result.scalar_one_or_none()
 
-    generic_invalid = APIError(
-        "Invalid or expired code", status=400, errors={"code": "invalid"}
-    )
-
-    if not user:
-        raise generic_invalid
-    if user.email_confirmed:
-        return ok(message="Your email is already confirmed — you can sign in.")
-    if (
-        not user.email_token
-        or not user.email_token_expires
-        or datetime.utcnow() > user.email_token_expires
-    ):
+    if not user or not verify_link_token(token, user.email_token):
         raise APIError(
-            "That code has expired. Request a new one.",
+            "This confirmation link isn't valid. Request a new one below.",
             status=400,
-            errors={"code": "expired"},
-        )
-    if user.email_token_attempts >= settings.EMAIL_OTP_MAX_ATTEMPTS:
-        raise APIError(
-            "Too many incorrect attempts. Request a new code.",
-            status=429,
-            errors={"code": "locked"},
+            errors={"token": "invalid"},
         )
 
-    if not verify_otp_code(body.code, user.email_token):
-        user.email_token_attempts += 1
-        await db.commit()
-        raise generic_invalid
+    if user.email_token_expires and datetime.utcnow() > user.email_token_expires:
+        raise APIError(
+            "This confirmation link has expired. Request a new one below.",
+            status=400,
+            errors={"token": "expired"},
+        )
 
     user.email_confirmed = True
     user.email_token = None
     user.email_token_expires = None
     user.email_token_attempts = 0
+
     await record_audit(
         db,
         action=AuditAction.EMAIL_CONFIRMED,
@@ -319,21 +308,22 @@ async def verify_email(request: Request, body: VerifyEmailRequest, db: DbDep):
         request=request,
     )
     await db.commit()
+    await db.refresh(user)
 
     sub_res = await db.execute(
         select(Subscription).where(Subscription.restaurant_id == user.restaurant_id)
     )
     sub = sub_res.scalar_one_or_none()
 
-    # Verifying the code proves email ownership just as signing in would, so
-    # issue a session immediately instead of forcing a separate login step.
+    # Same shape as /login, so the client has one code path for "I now have a
+    # session" regardless of how it got one.
     return ok(
         {
             "user": UserOut.model_validate(user).model_dump(),
             "subscription": subscription_dict(sub) if sub else None,
             "tokens": _issue_tokens(user),
         },
-        message="Email confirmed — you're in!",
+        message="Email confirmed — welcome to Karibu POS!",
     )
 
 
@@ -353,9 +343,9 @@ async def resend_confirmation(request: Request, body: LoginRequest, db: DbDep):
     if user.email_confirmed:
         return generic
 
-    code = _set_otp(user)
+    code = _set_confirmation_token(user)
     await db.commit()
-    await _send_confirmation_code(user, code)
+    await _send_confirmation_link(user, code)
     return generic
 
 
