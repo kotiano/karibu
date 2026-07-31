@@ -20,8 +20,16 @@ import pytest
 
 # Must be set BEFORE app.core.config is imported — Settings reads the
 # environment at import time and is cached.
+#
+# KARIBU_ENV_FILE first, and it is the important one: without it Settings loads
+# the developer's real .env, so the suite's result depends on an untracked file
+# that differs on every machine. It is pointed at a path that does not exist,
+# which makes the configuration below the whole of the configuration — the
+# tests now see exactly these values plus the defaults in config.py, on any
+# machine, in CI, and after anyone edits .env.
 _TMP = Path(tempfile.mkdtemp(prefix="karibu-tests-"))
 os.environ.update(
+    KARIBU_ENV_FILE=str(_TMP / "no-such.env"),
     DATABASE_URL=f"sqlite+aiosqlite:///{_TMP}/test.db",
     ENV="development",
     EMAIL_PROVIDER="smtp",

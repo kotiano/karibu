@@ -3,6 +3,7 @@
 Mirrors the Flask config surface so .env files carry over unchanged. Money is
 in integer cents everywhere; never commit real secrets (use .env).
 """
+import os
 from functools import lru_cache
 
 from pydantic import field_validator
@@ -10,7 +11,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # The dotenv path is overridable so the test suite can point it at nothing.
+    # Otherwise pytest reads the developer's real .env, and the suite's result
+    # depends on an untracked, machine-specific file — locking ALLOWED_HOSTS to
+    # the production hostname broke 33 of 34 tests on "Invalid host header",
+    # with nothing in the diff to explain why.
+    model_config = SettingsConfigDict(
+        env_file=os.getenv("KARIBU_ENV_FILE", ".env"), extra="ignore"
+    )
 
     ENV: str = "development"  # development | production | testing
 
