@@ -66,6 +66,7 @@ def order_dict(order: Order, detailed: bool = True) -> dict:
                 "amount": round(p.amount_cents / 100, 2),
                 "reference": p.reference,
                 "received_at": p.received_at,
+            "recorded_by": p.recorded_by.full_name if p.recorded_by else None,
             }
             for p in order.payments
         ]

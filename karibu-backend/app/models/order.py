@@ -153,6 +153,17 @@ class Payment(BaseModel):
     method: Mapped[str] = mapped_column(String(20), nullable=False)
     amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
     reference: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+    # WHO SAID THIS MONEY CAME IN. Anyone may record a payment — that is
+    # deliberate, because a waiter who fails to record what they were handed is
+    # the person the unpaid order stays against. Replacing the permission with
+    # an attribution only works if the attribution actually exists, and the
+    # order's server is not it: on a busy floor whoever is nearest closes the
+    # bill, and "who served the table" then answers the wrong question.
+    recorded_by_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    recorded_by: Mapped["User | None"] = relationship()  # noqa: F821
     received_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False, index=True
     )

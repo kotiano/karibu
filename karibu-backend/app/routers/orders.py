@@ -164,10 +164,17 @@ async def update_status(order_id: str, body: StatusUpdate, user: SubscribedUser,
     return ok(order_dict(order), message=f"Order marked {body.status}")
 
 
-# Taking money is cashier and above. A waiter carries plates; letting them
-# also close bills removes the only separation this restaurant has.
-@router.post("/{order_id}/payments", status_code=201,
-             dependencies=[Depends(require_roles(*UserRole.HANDLES_MONEY))])
+# DELIBERATELY OPEN TO EVERY ROLE, including waiters.
+#
+# The control here is accountability, not permission. A waiter handed cash must
+# be able to record it; if they cannot, the takings simply go unrecorded and the
+# money is harder to trace, not easier. Leaving it unrecorded is what costs
+# them: the order stays unpaid against their name in /analytics/accountability
+# until somebody explains it.
+#
+# Voiding an order is the opposite case and stays manager-only — that erases a
+# record rather than creating one.
+@router.post("/{order_id}/payments", status_code=201)
 async def record_payment(order_id: str, body: OrderPaymentIn, user: SubscribedUser, db: DbDep):
     order = await _get_scoped_order(db, order_id, user.restaurant_id)
     amount_cents = int(round(body.amount * 100))
@@ -221,6 +228,7 @@ async def record_payment(order_id: str, body: OrderPaymentIn, user: SubscribedUs
                 method=body.method,
                 amount_cents=amount_cents,
                 reference=body.reference,
+                recorded_by_id=user.id,
             )
         )
     else:

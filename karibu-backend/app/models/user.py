@@ -32,8 +32,15 @@ class UserRole:
 
     # Everyone who may see money-wide screens and manage staff.
     MANAGERS = (MANAGER,)
-    # Everyone who may take payment or authorise credit.
-    HANDLES_MONEY = (MANAGER, CASHIER)
+    #
+    # There is deliberately NO "handles money" rank. Recording a payment is open
+    # to every role — a waiter handed cash has to be able to write it down, and
+    # blocking them does not stop the money moving, only its being recorded.
+    # What holds people to it is the accountability ledger: an unrecorded
+    # payment leaves the order unpaid against the person who served it.
+    #
+    # Voiding an order is the opposite case and IS manager-only, because that
+    # erases a record rather than creating one.
 
     _RANK = {MANAGER: 3, CASHIER: 2, WAITER: 1}
 

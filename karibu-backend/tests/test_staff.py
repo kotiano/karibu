@@ -200,11 +200,34 @@ def test_a_waiter_can_take_orders(client, owner, waiter):
     assert order["server_name"] == "Otieno", "the order must carry who took it"
 
 
-def test_a_waiter_cannot_take_payment(client, owner, waiter):
+def test_a_waiter_CAN_record_a_payment(client, owner, waiter):
+    """Deliberately allowed, and the reason is worth stating.
+
+    A waiter handed cash must be able to write it down. Blocking them does not
+    stop the money changing hands — it stops it being recorded, which is
+    strictly worse. What holds them to it is the ledger: an order left unpaid
+    stays against their name until somebody explains it.
+    """
     order = _order(client, waiter, owner)
     r = client.post(f"/api/orders/{order['id']}/payments",
                     json={"method": "cash", "amount": 500}, headers=waiter)
-    assert r.status_code == 403
+    assert r.status_code == 201, r.text
+
+    # And the payment carries who said it came in — the whole basis of trading
+    # the permission for an attribution.
+    fetched = client.get(f"/api/orders/{order['id']}", headers=owner["headers"]).json()["data"]
+    assert fetched["payments"][0]["recorded_by"] == "Otieno"
+
+
+def test_an_unrecorded_payment_stays_against_the_waiter(client, owner, waiter):
+    """The actual control. Not taking payment is what costs them."""
+    _order(client, waiter, owner)  # served, nothing recorded
+
+    report = client.get("/api/analytics/accountability",
+                        headers=owner["headers"]).json()["data"]
+    row = next(r for r in report["staff"] if r["name"] == "Otieno")
+    assert row["unpaid_orders"] == 1
+    assert row["unpaid_value"] == 500
 
 
 def test_a_cashier_can_take_payment(client, owner, cashier):
