@@ -67,16 +67,6 @@ class OrderPaymentIn(BaseModel):
     due_date: NaiveUTCDatetime | None = None
 
 
-class PlayPurchaseIn(BaseModel):
-    """A Google Play purchase token, handed over for server-side verification.
-
-    Deliberately the ONLY thing accepted from the client. Price, product state
-    and expiry are all re-fetched from Google — anything the app could assert
-    about its own purchase is worth nothing as evidence of payment.
-    """
-    purchase_token: str = Field(min_length=10, max_length=255)
-
-
 class DebtPaymentIn(BaseModel):
     """A repayment against an outstanding debt."""
     amount: float = Field(gt=0)

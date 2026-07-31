@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models import (
     BillingCharge,
-    BillingProvider,
     ChargeStatus,
     ProcessedCallback,
     Restaurant,
@@ -30,7 +29,7 @@ from app.models import (
     UserRole,
 )
 from app.services import email as email_service
-from app.services import google_play, paystack
+from app.services import paystack
 
 
 async def _owner_for(db: AsyncSession, restaurant_id: str) -> User | None:
@@ -256,136 +255,6 @@ async def initiate_charge(
     return charge
 
 
-# --- Google Play Billing ----------------------------------------------------
-async def _apply_play_state(
-    db: AsyncSession, sub: Subscription, state: dict
-) -> None:
-    """Mirror Google's view of a subscription onto ours.
-
-    Google owns the lifecycle here, so this only ever copies — it never decides.
-    Dunning counters are cleared because retry scheduling is Google's job on
-    this rail; leaving stale values would make the Paystack sweep think the
-    subscription needed chasing.
-    """
-    sub.provider = BillingProvider.GOOGLE_PLAY
-    sub.google_expiry_at = state["expiry"]
-    sub.failed_attempts = 0
-    sub.next_retry_at = None
-
-    if state["entitled"]:
-        sub.status = SubscriptionStatus.ACTIVE
-        sub.current_period_end = state["expiry"]
-        if not sub.current_period_start:
-            sub.current_period_start = datetime.utcnow()
-    else:
-        # Expired, revoked, on hold or paused — access stops. Google has already
-        # given the user every chance to fix payment by this point.
-        sub.status = SubscriptionStatus.SUSPENDED
-
-    restaurant = await db.get(Restaurant, sub.restaurant_id)
-    if restaurant:
-        restaurant.is_active = state["entitled"]
-
-
-async def verify_and_link_purchase(
-    db: AsyncSession, restaurant_id: str, purchase_token: str
-) -> Subscription:
-    """Verify a Play purchase with Google and attach it to this restaurant.
-
-    The client sends a purchase token; a client claim proves nothing, so the
-    token is checked against Google before any entitlement is granted.
-
-    Raises GooglePlayError / PurchaseNotFound on a token Google won't confirm,
-    and ValueError if the token already belongs to a different restaurant.
-    """
-    state = await google_play.get_subscription(purchase_token)
-
-    # A purchase may supersede an earlier one (upgrade, resubscribe). Follow the
-    # chain so the old row is reused rather than stranding a second subscription
-    # pointing at a dead token.
-    tokens = [purchase_token]
-    if state.get("linked_token"):
-        tokens.append(state["linked_token"])
-
-    existing = (
-        await db.execute(
-            select(Subscription).where(Subscription.google_purchase_token.in_(tokens))
-        )
-    ).scalars().first()
-
-    if existing and existing.restaurant_id != restaurant_id:
-        # Someone is replaying another tenant's receipt. The unique index would
-        # stop it anyway; failing here gives a clear reason instead of a 500.
-        raise ValueError("This purchase is already linked to another restaurant")
-
-    sub = existing or (
-        await db.execute(
-            select(Subscription).where(Subscription.restaurant_id == restaurant_id)
-        )
-    ).scalar_one_or_none()
-
-    if not sub:
-        raise ValueError("No subscription found for this restaurant")
-
-    sub.google_purchase_token = purchase_token
-    await _apply_play_state(db, sub, state)
-    await db.commit()
-
-    # Acknowledge AFTER committing entitlement. Google revokes and refunds
-    # anything unacknowledged within three days, but acknowledging before the
-    # grant is durable would risk telling Google we delivered something we then
-    # failed to record.
-    if state["entitled"] and not state["acknowledged"]:
-        try:
-            await google_play.acknowledge(purchase_token)
-        except google_play.GooglePlayError:
-            # The reconcile sweep retries this; a failure here must not undo a
-            # purchase the customer has already paid for.
-            logging.getLogger("karibu.billing").exception(
-                "Failed to acknowledge Play purchase — will retry on next sweep"
-            )
-    return sub
-
-
-async def process_play_notification(db: AsyncSession, note: dict) -> str:
-    """Apply a Real-time Developer Notification.
-
-    The notification itself is only a nudge — it carries a type but we never
-    trust it. The purchase token is re-verified against Google's API, so a
-    forged notification hitting the endpoint grants nothing.
-    """
-    token = note.get("purchase_token")
-    if not token:
-        return "ignored_no_token"
-
-    sub = (
-        await db.execute(
-            select(Subscription).where(Subscription.google_purchase_token == token)
-        )
-    ).scalar_one_or_none()
-    if not sub:
-        # Common and harmless: the RTDN can beat the client's verify call.
-        # verify_and_link_purchase will fetch fresh state moments later.
-        return "no_matching_subscription"
-
-    try:
-        state = await google_play.get_subscription(token)
-    except google_play.PurchaseNotFound:
-        sub.status = SubscriptionStatus.SUSPENDED
-        restaurant = await db.get(Restaurant, sub.restaurant_id)
-        if restaurant:
-            restaurant.is_active = False
-        await db.commit()
-        return "purchase_gone"
-
-    await _apply_play_state(db, sub, state)
-    await db.commit()
-
-    if not state["entitled"]:
-        await _notify_owner_payment_issue(db, sub)
-    return f"applied_{state['state']}"
-
-
 # --- Webhook processing ----------------------------------------------------
 # Paystack fires charge.success on payment and charge.failed when the customer
 # cancels or has insufficient funds. Anything else (transfers, refunds,
@@ -519,13 +388,7 @@ async def run_billing_sweep(db: AsyncSession, now: datetime | None = None) -> di
                     SubscriptionStatus.ACTIVE,
                     SubscriptionStatus.PAST_DUE,
                 )
-            ),
-            # Google owns renewal for Play-billed subscriptions. Charging one
-            # here would bill the same restaurant twice — once through Google's
-            # auto-renewal and again through Paystack — so they are excluded at
-            # the query, not by a check further down that a later edit could
-            # skip past.
-            Subscription.provider == BillingProvider.PAYSTACK,
+            )
         )
     )
     candidates = result.scalars().all()

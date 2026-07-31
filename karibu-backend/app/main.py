@@ -24,7 +24,16 @@ from app.core.config import settings
 from app.core.database import Base, engine
 from app.core.limiter import limiter
 from app.core.security import APIError
-from app.routers import admin, analytics, auth, billing, debts, menu, orders
+from app.routers import (
+    admin,
+    analytics,
+    auth,
+    billing,
+    debts,
+    expenses,
+    menu,
+    orders,
+)
 
 logger = logging.getLogger("karibu")
 
@@ -226,34 +235,8 @@ app.include_router(debts.router)
 app.include_router(menu.router)
 app.include_router(orders.router)
 app.include_router(analytics.router)
+app.include_router(expenses.router)
 
-
-# --- Web app (PWA) ----------------------------------------------------------
-# The same Expo codebase compiled for the browser, served from this origin.
-#
-# MOUNTED LAST, AND THAT IS LOAD-BEARING. Starlette matches routes in the order
-# they were added, and this mount is at "/" — it would swallow every API path if
-# it were registered before the routers above.
-#
-# Same origin as the API on purpose: no CORS to configure, no second host to
-# deploy or keep alive, and the privacy/legal URLs already live here.
-#
-# Built by `npm run build:web` in the frontend repo, which also copies the
-# output here. Never hand-edit anything under static/web — it is generated.
-_WEB_DIR = os.path.join(os.path.dirname(__file__), "static", "web")
-if os.path.isdir(_WEB_DIR):
-    from fastapi.staticfiles import StaticFiles
-
-    # html=True serves index.html for "/" and for unknown paths, which is what a
-    # single-page app needs — a refresh on any client-side route must return the
-    # shell rather than a 404.
-    app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
-else:  # pragma: no cover - only when the web build has never been run
-    logger.info(
-        "No web build at %s — run `npm run build:web` in the frontend repo to "
-        "serve the browser app from this host.",
-        _WEB_DIR,
-    )
 
 
 # --- Scheduler --------------------------------------------------------------

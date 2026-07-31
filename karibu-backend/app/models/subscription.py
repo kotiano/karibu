@@ -37,24 +37,6 @@ class SubscriptionStatus:
     ACCESS_OK = (TRIALING, ACTIVE, PAST_DUE)
 
 
-class BillingProvider:
-    """Who owns the subscription's billing lifecycle.
-
-    PAYSTACK  — we drive it: the sweep decides when to charge, pushes an STK
-                prompt, and moves the subscription through dunning ourselves.
-    GOOGLE_PLAY — Google drives it. Play holds the payment method, renews on its
-                own schedule, and tells us what happened via Real-time Developer
-                Notifications. We are a follower here, not the source of truth,
-                so the sweep must never try to charge one of these (see
-                run_billing_sweep) or it would double-bill through two rails.
-
-    Google Play Billing is required for app-distributed subscriptions to cloud
-    business software; Paystack remains for anything sold outside the app.
-    """
-
-    PAYSTACK = "paystack"
-    GOOGLE_PLAY = "google_play"
-
 
 class ChargeStatus:
     PENDING = "pending"
@@ -87,32 +69,6 @@ class Subscription(BaseModel):
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    # --- Which rail bills this subscription ---------------------------------
-    provider: Mapped[str] = mapped_column(
-        String(20),
-        default=BillingProvider.PAYSTACK,
-        server_default=BillingProvider.PAYSTACK,
-        nullable=False,
-    )
-
-    # Google's opaque handle for the purchase. Unique, because two restaurants
-    # must never be able to claim the same purchase — that is the whole attack
-    # against client-reported receipts, and the DB is where it's stopped rather
-    # than in application logic that can be bypassed.
-    #
-    # Google issues a NEW token on some upgrades/resubscribes and points the old
-    # one at it via linkedPurchaseToken; verify_and_link follows that chain.
-    google_purchase_token: Mapped[str | None] = mapped_column(
-        String(255), unique=True, nullable=True, index=True
-    )
-    # Google's own expiry for the current period. Kept separate from
-    # current_period_end so a Play-billed subscription's truth stays visibly
-    # Google's, not ours.
-    google_expiry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-    @property
-    def is_play_billed(self) -> bool:
-        return self.provider == BillingProvider.GOOGLE_PLAY
 
     charges: Mapped[list["BillingCharge"]] = relationship(
         back_populates="subscription", cascade="all, delete-orphan", lazy="selectin"

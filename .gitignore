@@ -6,6 +6,10 @@
 # nobody can clone — ignore it outright.
 karibu-frontend/
 
+# The web app is its own repo (kotiano/karibu-web) so Vercel can deploy it
+# directly. Tracking it from here would record a bare gitlink nobody can clone.
+karibu-web/
+
 # Personal agent overrides. karibu-backend/.claude/settings.json stays tracked
 # (it already was), but the repo-root one is a per-session permission
 # allowlist full of local scratchpad paths — never useful to share.

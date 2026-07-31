@@ -1,6 +1,7 @@
 """Model package — importing here registers every table on the Base metadata."""
 from app.models.audit import AuditAction, AuditLog
 from app.models.base import BaseModel
+from app.models.expense import Expense, ExpenseCategory
 from app.models.debt import Debt, DebtStatus
 from app.models.menu import Category, MenuItem
 from app.models.order import (
@@ -18,7 +19,6 @@ from app.models.subscription import (
     ChargeStatus,
     ProcessedCallback,
     Subscription,
-    BillingProvider,
     SubscriptionStatus,
 )
 from app.models.user import User, UserRole
@@ -38,13 +38,14 @@ __all__ = [
     "PaymentMethod",
     "PaymentStatus",
     "Subscription",
-    "BillingProvider",
     "SubscriptionStatus",
     "BillingCharge",
     "ChargeStatus",
     "ProcessedCallback",
     "AuditLog",
     "AuditAction",
+    "Expense",
+    "ExpenseCategory",
     "Debt",
     "DebtStatus",
 ]

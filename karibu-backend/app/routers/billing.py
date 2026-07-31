@@ -1,7 +1,5 @@
 """Billing routes: subscription status, owner-initiated pay/retry, charge
-history, Google Play purchase verification, and the gateway webhook receivers
-(public, verified, idempotent)."""
-import hmac
+history, and the Paystack webhook receiver (public, verified, idempotent)."""
 import json
 
 from fastapi import APIRouter, Depends, Request
@@ -18,8 +16,8 @@ from app.core.security import APIError
 from app.core.serializers import charge_dict, subscription_dict
 from app.models import BillingCharge, ChargeStatus, Restaurant, Subscription, UserRole
 from app.schemas.common import ok
-from app.schemas.order import PayRequest, PlayPurchaseIn
-from app.services import billing, google_play, paystack
+from app.schemas.order import PayRequest
+from app.services import billing, paystack
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -92,84 +90,6 @@ async def list_charges(db: DbDep, user=Depends(require_roles(*MANAGERS))):
     )
     charges = charges_res.scalars().all()
     return ok({"charges": [charge_dict(c) for c in charges]})
-
-
-# --- Google Play Billing ----------------------------------------------------
-@router.post("/google/verify")
-async def verify_play_purchase(
-    body: PlayPurchaseIn,
-    db: DbDep,
-    restaurant: Restaurant = Depends(get_current_restaurant),
-    _owner=Depends(require_roles(UserRole.OWNER)),
-):
-    """Redeem a Google Play purchase token for entitlement.
-
-    The app calls this after Play reports a successful purchase. The token is
-    the *only* thing accepted from the client — no price, no product state, no
-    "isActive" flag — because everything else is re-fetched from Google. A
-    client claim is not evidence of payment.
-    """
-    if not settings.play_billing_enabled:
-        raise APIError("Google Play billing is not configured", status=503)
-
-    try:
-        sub = await billing.verify_and_link_purchase(
-            db, restaurant.id, body.purchase_token.strip()
-        )
-    except google_play.PurchaseNotFound:
-        raise APIError(
-            "Google has no record of this purchase. If you were charged, "
-            "reopen the app in a few minutes and it will be applied.",
-            status=404,
-        )
-    except ValueError as exc:
-        raise APIError(str(exc), status=409)
-    except google_play.GooglePlayError as exc:
-        # Google unreachable or misconfigured. 502 so the client retries rather
-        # than treating it as a rejected purchase.
-        raise APIError(f"Could not verify with Google Play: {exc}", status=502)
-
-    return ok(
-        {"subscription": subscription_dict(sub)},
-        message="Subscription active — asante!",
-    )
-
-
-@router.post("/webhook/google/{secret}")
-async def google_play_webhook(secret: str, request: Request, db: DbDep):
-    """Receive a Real-time Developer Notification from Google Play.
-
-    Pub/Sub push cannot send custom headers or sign its payload, so the only
-    edge authentication available is a secret path segment — compared in
-    constant time. That is thin on its own, which is why the notification is
-    treated purely as a nudge: the purchase token inside it is re-verified
-    against Google's API before anything changes, so a forged notification
-    grants no entitlement.
-
-    Always 200s on an authentic request. Pub/Sub redelivers anything else, and
-    a retry storm on a genuine bug is worse than a dropped notification we will
-    reconcile on the next sweep anyway.
-    """
-    expected = settings.GOOGLE_PLAY_RTDN_SECRET
-    if not expected or not hmac.compare_digest(secret, expected):
-        raise APIError("Not found", status=404)
-
-    try:
-        envelope = await request.json()
-    except Exception:
-        envelope = {}
-
-    note = google_play.decode_rtdn(envelope)
-    if not note or note.get("test"):
-        # Google's one-off wiring test, or a notification type we don't act on.
-        return {"status": "ok"}
-
-    try:
-        outcome = await billing.process_play_notification(db, note)
-    except Exception:
-        await db.rollback()
-        outcome = "error"
-    return {"status": "ok", "outcome": outcome}
 
 
 # --- Paystack webhook (public, signature-verified) --------------------------
