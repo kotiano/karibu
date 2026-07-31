@@ -6,14 +6,16 @@ distort the only numbers the owner uses to decide anything.
 """
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.security import APIError
 from app.models import Expense, ExpenseCategory, UserRole
 from app.schemas.common import ok
 from app.schemas.expense import ExpenseCreate, ExpenseUpdate
+from app.services.reports import Report, csv_bytes, money, render
 
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
@@ -168,3 +170,135 @@ async def _scoped(db, expense_id: str, restaurant_id: str) -> Expense:
     if not expense:
         raise APIError("Expense not found", status=404)
     return expense
+
+
+# Raw enum keys are what the database calls them; a report is read by a person.
+CATEGORY_LABELS = {
+    "stock": "Stock & ingredients",
+    "rent": "Rent",
+    "salaries": "Salaries",
+    "utilities": "Utilities",
+    "transport": "Transport",
+    "equipment": "Equipment",
+    "licences": "Licences & permits",
+    "marketing": "Marketing",
+    "repairs": "Repairs",
+    "other": "Other",
+}
+
+
+async def _expenses_for_export(db, user, days: int):
+    """Every expense in the window, oldest first — no pagination.
+
+    The list endpoint pages because a screen scrolls; an export that silently
+    stopped at 100 rows would be a quietly wrong accounting document, which is
+    the worst kind.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    result = await db.execute(
+        select(Expense)
+        .where(Expense.restaurant_id == user.restaurant_id, Expense.spent_at >= since)
+        .options(selectinload(Expense.recorded_by))
+        .order_by(Expense.spent_at.asc())
+    )
+    return result.scalars().all(), since
+
+
+@router.get("/export.csv", dependencies=[Depends(require_roles(*MANAGERS))])
+async def expenses_csv(
+    user: SubscribedUser,
+    db: DbDep,
+    days: int = Query(default=30, ge=1, le=366),
+):
+    """Expenses as CSV, for the books. Owner/manager only, like the figures."""
+    expenses, _ = await _expenses_for_export(db, user, days)
+    data = csv_bytes(
+        ["Date", "Category", "Payee", "Amount (KES)", "Method", "Reference", "Note", "Recorded by"],
+        [
+            [
+                e.spent_at.strftime("%Y-%m-%d"),
+                CATEGORY_LABELS.get(e.category, e.category.title()),
+                e.payee or "",
+                f"{e.amount_cents / 100:.2f}",
+                e.method,
+                e.reference or "",
+                e.note or "",
+                e.recorded_by.full_name if e.recorded_by else "",
+            ]
+            for e in expenses
+        ],
+    )
+    filename = f"karibu-expenses-{datetime.utcnow():%Y%m%d}.csv"
+    return Response(
+        content=data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/export.pdf", dependencies=[Depends(require_roles(*MANAGERS))])
+async def expenses_pdf(
+    user: SubscribedUser,
+    db: DbDep,
+    days: int = Query(default=30, ge=1, le=366),
+):
+    """Expenses as a PDF: totals and a category breakdown, then every line."""
+    expenses, since = await _expenses_for_export(db, user, days)
+
+    total = sum(e.amount_cents for e in expenses)
+    by_category: dict[str, int] = {}
+    for e in expenses:
+        by_category[e.category] = by_category.get(e.category, 0) + e.amount_cents
+
+    period = (
+        f"{since:%d %b %Y} - {datetime.utcnow():%d %b %Y}"
+        f" ({days} day{'s' if days != 1 else ''})"
+    )
+    pdf = Report("Expense report", user.branch_name or "Karibu POS", period)
+    pdf.alias_nb_pages()
+    pdf.add_page()
+
+    pdf.stat_row([
+        ("Total spent", money(total)),
+        ("Entries", f"{len(expenses):,}"),
+        ("Daily average", money(round(total / days)) if days else money(0)),
+    ])
+
+    pdf.section("Where the money went")
+    pdf.table(
+        ["Category", "Amount", "Share"],
+        [
+            [
+                CATEGORY_LABELS.get(cat, cat.title()),
+                money(cents),
+                f"{cents / total * 100:.0f}%" if total else "-",
+            ]
+            for cat, cents in sorted(by_category.items(), key=lambda kv: -kv[1])
+        ],
+        widths=[80, 60, 46],
+        align=["L", "R", "R"],
+        empty_message="No expenses were recorded in this period.",
+    )
+
+    pdf.section("Every entry")
+    pdf.table(
+        ["Date", "Category", "Payee", "Amount"],
+        [
+            [
+                e.spent_at.strftime("%d %b"),
+                CATEGORY_LABELS.get(e.category, e.category.title()),
+                e.payee or e.note or "-",
+                money(e.amount_cents),
+            ]
+            for e in expenses
+        ],
+        widths=[24, 52, 70, 40],
+        align=["L", "L", "L", "R"],
+    )
+
+    filename = f"karibu-expenses-{datetime.utcnow():%Y%m%d}.pdf"
+    return Response(
+        content=render(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

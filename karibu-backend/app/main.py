@@ -125,6 +125,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Content-Disposition is NOT a CORS-safelisted response header, so without
+    # this the browser hides it from JavaScript entirely on a cross-origin
+    # request — which every request from the Vercel app to this API is. The
+    # export downloads then fall back to a client-invented filename and lose the
+    # date the report actually covers. Caught by downloading one and reading the
+    # name, not by reading the code.
+    expose_headers=["Content-Disposition"],
 )
 
 

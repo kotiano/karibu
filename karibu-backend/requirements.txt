@@ -17,3 +17,4 @@ APScheduler==3.10.4
 redis==5.0.7
 email-validator==2.2.0
 psycopg2-binary==2.9.9  # sync driver for Alembic migrations (Postgres)
+fpdf2==2.8.7  # pure-Python PDF; WeasyPrint needs cairo/pango, absent on Render's free tier

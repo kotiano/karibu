@@ -9,7 +9,7 @@ of orders. The one Python-side pass (daily revenue series) reads bare
 """
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -17,8 +17,17 @@ from app.core.dependencies import DbDep, SubscribedUser
 from app.core.serializers import order_dict
 from app.models import Order, OrderItem, OrderStatus, Payment, User
 from app.schemas.common import ok
+from app.services.reports import Report, money, render
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
+
+# Raw enum keys are what the database calls them; a report is read by a person.
+PAYMENT_LABELS = {
+    "mpesa": "M-Pesa",
+    "cash": "Cash",
+    "card": "Card",
+    "debt": "On credit",
+}
 
 
 def _day_bounds(day: datetime):
@@ -353,5 +362,141 @@ async def sales_csv(
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/sales.pdf")
+async def sales_pdf(
+    user: SubscribedUser,
+    db: DbDep,
+    days: int = Query(default=30, ge=1, le=366),
+):
+    """The sales report as a PDF the owner can send to an accountant or a bank.
+
+    Deliberately a SUMMARY, not the row dump that sales.csv already provides.
+    A PDF is read, not filtered — if someone wants every line to sort and pivot,
+    the CSV is the right file and this one would just be a worse spreadsheet.
+    """
+    rid = user.restaurant_id
+    window_start = (datetime.utcnow() - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    gross_res = await db.execute(
+        select(func.coalesce(func.sum(Payment.amount_cents), 0))
+        .join(Order, Payment.order_id == Order.id)
+        .where(Order.restaurant_id == rid, Payment.received_at >= window_start)
+    )
+    gross_cents = gross_res.scalar() or 0
+
+    count_res = await db.execute(
+        select(func.count())
+        .select_from(Order)
+        .where(
+            Order.restaurant_id == rid,
+            Order.created_at >= window_start,
+            Order.status != OrderStatus.CANCELLED,
+        )
+    )
+    order_count = count_res.scalar() or 0
+
+    split_res = await db.execute(
+        select(Payment.method, func.sum(Payment.amount_cents))
+        .join(Order, Payment.order_id == Order.id)
+        .where(Order.restaurant_id == rid, Payment.received_at >= window_start)
+        .group_by(Payment.method)
+        .order_by(func.sum(Payment.amount_cents).desc())
+    )
+    method_split = split_res.all()
+
+    top_res = await db.execute(
+        select(
+            OrderItem.name_snapshot,
+            func.sum(OrderItem.quantity),
+            func.sum(OrderItem.unit_price_cents * OrderItem.quantity),
+        )
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(
+            Order.restaurant_id == rid,
+            Order.created_at >= window_start,
+            Order.status != OrderStatus.CANCELLED,
+        )
+        .group_by(OrderItem.name_snapshot)
+        .order_by(func.sum(OrderItem.quantity).desc())
+        .limit(10)
+    )
+    top_items = top_res.all()
+
+    series_res = await db.execute(
+        select(Payment.received_at, Payment.amount_cents)
+        .join(Order, Payment.order_id == Order.id)
+        .where(Order.restaurant_id == rid, Payment.received_at >= window_start)
+    )
+    daily: dict[str, int] = {
+        (window_start + timedelta(days=i)).strftime("%Y-%m-%d"): 0 for i in range(days)
+    }
+    for received_at, cents in series_res.all():
+        key = received_at.strftime("%Y-%m-%d")
+        if key in daily:
+            daily[key] += cents or 0
+
+    avg_cents = round(gross_cents / order_count) if order_count else 0
+    period = (
+        f"{window_start:%d %b %Y} - {datetime.utcnow():%d %b %Y}"
+        f" ({days} day{'s' if days != 1 else ''})"
+    )
+
+    pdf = Report("Sales report", user.branch_name or "Karibu POS", period)
+    pdf.alias_nb_pages()
+    pdf.add_page()
+
+    pdf.stat_row([
+        ("Gross revenue", money(gross_cents)),
+        ("Orders", f"{order_count:,}"),
+        ("Average order", money(avg_cents)),
+    ])
+
+    pdf.section("How customers paid")
+    pdf.table(
+        ["Method", "Amount", "Share"],
+        [
+            [
+                PAYMENT_LABELS.get(method, method.title()),
+                money(cents or 0),
+                f"{(cents or 0) / gross_cents * 100:.0f}%" if gross_cents else "-",
+            ]
+            for method, cents in method_split
+        ],
+        widths=[80, 60, 46],
+        align=["L", "R", "R"],
+        empty_message="No payments were recorded in this period.",
+    )
+
+    pdf.section("Best sellers")
+    pdf.table(
+        ["#", "Item", "Sold", "Revenue"],
+        [
+            [str(i + 1), name, str(int(qty or 0)), money(cents or 0)]
+            for i, (name, qty, cents) in enumerate(top_items)
+        ],
+        widths=[12, 108, 26, 40],
+        align=["L", "L", "R", "R"],
+        empty_message="Nothing was sold in this period.",
+    )
+
+    pdf.section("Daily revenue")
+    pdf.table(
+        ["Date", "Revenue"],
+        [[datetime.strptime(d, "%Y-%m-%d").strftime("%a %d %b"), money(c)]
+         for d, c in daily.items()],
+        widths=[100, 86],
+        align=["L", "R"],
+    )
+
+    filename = f"karibu-sales-{datetime.utcnow():%Y%m%d}.pdf"
+    return Response(
+        content=render(pdf),
+        media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
