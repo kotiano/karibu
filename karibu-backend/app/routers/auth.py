@@ -408,12 +408,23 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest, db: DbD
     url = f"{settings.PUBLIC_WEB_URL.rstrip('/')}/reset-password?token={token}"
     subject, html, text = email_service.password_reset_link(user.full_name, url)
     try:
-        await asyncio.wait_for(
+        sent = await asyncio.wait_for(
             email_service.send_email(user.email, subject, html, text),
             timeout=settings.EMAIL_SIGNUP_DEADLINE_SECONDS,
         )
     except asyncio.TimeoutError:
+        sent = False
         logger.error("Password reset email to %s timed out", user.email)
+    if not sent:
+        # The response stays deliberately identical — saying "we couldn't send
+        # it" here would confirm the address exists. But somebody has to be able
+        # to find out why nothing arrived, and the log is the only place that
+        # can say so without leaking.
+        logger.error(
+            "Password reset email to %s was NOT delivered. The user will see "
+            "the same message either way, so check the mail transport.",
+            user.email,
+        )
     return generic
 
 

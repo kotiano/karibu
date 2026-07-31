@@ -180,6 +180,27 @@ class Settings(BaseSettings):
         if "change-me" in self.JWT_SECRET_KEY or len(self.JWT_SECRET_KEY) < 32:
             problems.append("JWT_SECRET_KEY is default/too short (need 32+ random chars)")
         # Without a secret key, charges silently run in simulation mode — every
+        # SQLITE IN PRODUCTION IS SILENT DATA LOSS, not a performance choice.
+        #
+        # On Render, Railway, Fly and every other container host the filesystem
+        # is EPHEMERAL: each deploy, restart, or wake from idle gives a brand
+        # new container, and a SQLite file living on it is simply gone. The app
+        # then calls create_all, gets an empty schema, and starts up looking
+        # perfectly healthy — so the failure presents as "every account
+        # disappeared and I have to sign up again", with nothing in the logs.
+        #
+        # Refusing to boot converts that into an obvious failure at deploy time,
+        # which is the difference between an hour of confusion and a message
+        # naming the fix.
+        if self.DATABASE_URL.startswith("sqlite"):
+            problems.append(
+                "DATABASE_URL is SQLite, which is stored on the container's "
+                "disk and is DESTROYED on every deploy, restart and wake from "
+                "idle — every account and order would be lost. Provision a "
+                "Postgres database and set DATABASE_URL to its "
+                "postgresql+asyncpg://… URL."
+            )
+
         # subscription would appear to bill successfully while no money moves.
         if not self.PAYSTACK_SECRET_KEY.strip():
             problems.append(
