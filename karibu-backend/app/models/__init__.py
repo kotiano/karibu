@@ -2,6 +2,7 @@
 from app.models.audit import AuditAction, AuditLog
 from app.models.base import BaseModel
 from app.models.expense import Expense, ExpenseCategory
+from app.models.recipe import RecipeLine
 from app.models.stock import MovementReason, StockItem, StockMovement, StockUnit
 from app.models.debt import Debt, DebtStatus
 from app.models.menu import Category, MenuItem
@@ -48,6 +49,7 @@ __all__ = [
     "Expense",
     "ExpenseCategory",
     "MovementReason",
+    "RecipeLine",
     "StockItem",
     "StockMovement",
     "StockUnit",

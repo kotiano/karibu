@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "*"
 
     # --- Subscription / billing ---------------------------------------------
-    SUBSCRIPTION_PRICE_CENTS: int = 49900  # KSh 499.00
+    SUBSCRIPTION_PRICE_CENTS: int = 99900  # KSh 999.00
     SUBSCRIPTION_CURRENCY: str = "KES"
     # SEVEN, not fourteen. The default matters as much as the env var: a
     # deployment that never sets TRIAL_DAYS silently gets whatever is written

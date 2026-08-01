@@ -18,11 +18,13 @@ from sqlalchemy.orm import selectinload
 from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.security import APIError
 from app.models import (
-    Expense, ExpenseCategory, MovementReason, StockItem, StockMovement,
-    StockUnit, UserRole,
+    Expense, ExpenseCategory, MenuItem, MovementReason, RecipeLine, StockItem,
+    StockMovement, StockUnit, UserRole,
 )
 from app.schemas.common import ok
-from app.schemas.stock import MovementCreate, StockItemCreate, StockItemUpdate, to_milli
+from app.schemas.stock import (
+    MovementCreate, RecipeSet, StockItemCreate, StockItemUpdate, to_milli,
+)
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
 
@@ -111,7 +113,7 @@ async def list_stock(
             "low_count": len(low),
             "total_value": total_value / 100 if total_value is not None else None,
             "units": list(StockUnit.ALL),
-            "reasons": list(MovementReason.ALL),
+            "reasons": list(MovementReason.MANUAL),
         }
     )
 
@@ -295,4 +297,124 @@ async def list_movements(
             "consumed": abs((used_res.scalar() or 0)) / 1000,
             "range_days": days,
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recipes: what a dish takes off the shelf when it sells.
+# ---------------------------------------------------------------------------
+@router.get("/{item_id}/recipes", dependencies=[Depends(require_roles(*MANAGERS))])
+async def list_recipes(item_id: str, user: SubscribedUser, db: DbDep):
+    """Which dishes consume this ingredient, and how much each takes."""
+    item = await _get_item(db, user, item_id)
+
+    result = await db.execute(
+        select(RecipeLine)
+        .join(MenuItem, RecipeLine.menu_item_id == MenuItem.id)
+        .where(RecipeLine.stock_item_id == item.id)
+        .options(selectinload(RecipeLine.menu_item))
+        .order_by(MenuItem.name.asc())
+    )
+    lines = result.scalars().all()
+
+    # Only dishes this restaurant sells, and not the archived ones — a picker
+    # offering retired items would let someone wire up a recipe that can never
+    # fire.
+    dishes_res = await db.execute(
+        select(MenuItem)
+        .where(
+            MenuItem.restaurant_id == user.restaurant_id,
+            MenuItem.is_archived.is_(False),
+        )
+        .order_by(MenuItem.name.asc())
+    )
+
+    return ok(
+        {
+            "item": _item_dict(item),
+            "recipes": [
+                {
+                    "id": r.id,
+                    "menu_item_id": r.menu_item_id,
+                    "menu_item_name": r.menu_item.name if r.menu_item else None,
+                    "quantity": r.quantity,
+                    # The number the owner actually thinks in: how many plates
+                    # one whole unit yields. Derived, never stored — storing
+                    # both invites them to disagree.
+                    "portions_per_unit": round(1000 / r.quantity_milli, 2)
+                    if r.quantity_milli
+                    else None,
+                }
+                for r in lines
+            ],
+            "menu_items": [
+                {"id": m.id, "name": m.name} for m in dishes_res.scalars().all()
+            ],
+        }
+    )
+
+
+@router.post("/{item_id}/recipes", dependencies=[Depends(require_roles(*MANAGERS))])
+async def set_recipe(
+    item_id: str, body: RecipeSet, user: SubscribedUser, db: DbDep
+):
+    """Set (or clear) how much of this ingredient one sale of a dish uses.
+
+    Accepts EITHER `portions_per_unit` — "this kg makes 4 plates" — or an
+    explicit `quantity`. The first is the number an owner knows; the second is
+    what actually gets stored. Converting here means the arithmetic happens
+    once, in one place, rather than in whichever screen asked.
+    """
+    item = await _get_item(db, user, item_id)
+
+    dish = (
+        await db.execute(
+            select(MenuItem).where(
+                MenuItem.id == body.menu_item_id,
+                MenuItem.restaurant_id == user.restaurant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not dish:
+        raise APIError("Menu item not found", status=404)
+
+    if body.portions_per_unit is not None:
+        quantity_milli = round(1000 / body.portions_per_unit)
+    else:
+        quantity_milli = to_milli(body.quantity or 0)
+
+    existing = (
+        await db.execute(
+            select(RecipeLine).where(
+                RecipeLine.stock_item_id == item.id,
+                RecipeLine.menu_item_id == dish.id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    # Zero means "this dish does not use this ingredient" — the natural way to
+    # undo a link, rather than a separate delete endpoint the UI has to know.
+    if quantity_milli <= 0:
+        if existing:
+            await db.delete(existing)
+            await db.commit()
+        return ok(message=f"{dish.name} no longer uses {item.name}")
+
+    if existing:
+        existing.quantity_milli = quantity_milli
+    else:
+        db.add(
+            RecipeLine(
+                menu_item_id=dish.id,
+                stock_item_id=item.id,
+                quantity_milli=quantity_milli,
+            )
+        )
+    await db.commit()
+
+    per_sale = quantity_milli / 1000
+    return ok(
+        message=(
+            f"One {dish.name} now uses {per_sale:g} {item.unit} of {item.name}"
+        )
     )

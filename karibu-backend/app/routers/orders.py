@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.security import APIError
 from app.core.serializers import order_dict
+from app.services import stock_deduction
 from app.models import (
     Debt,
     DebtStatus,
@@ -148,6 +149,14 @@ async def create_order(body: OrderCreate, user: SubscribedUser, db: DbDep):
         )
 
     order.recalculate()
+
+    # Ingredients come off the shelf NOW, not at payment: this is when the
+    # kitchen starts cooking, and an overstated shelf during service is exactly
+    # when someone is deciding whether there is enough left for another table.
+    # In the same transaction as the order, so a failure leaves neither.
+    await db.flush()
+    await stock_deduction.apply_sale(db, order, user.id)
+
     await db.commit()
     await db.refresh(order, attribute_names=["items", "payments", "server"])
     return ok(order_dict(order), message="Order placed")
@@ -263,6 +272,14 @@ async def cancel_order(order_id: str, user: SubscribedUser, db: DbDep):
     order = await _get_scoped_order(db, order_id, user.restaurant_id)
     if order.payment_status == PaymentStatus.PAID:
         raise APIError("Cannot cancel a fully paid order", status=409)
+    if order.status == OrderStatus.CANCELLED:
+        # Without this, cancelling twice returns the ingredients twice and
+        # invents stock that never existed.
+        raise APIError("That order is already cancelled", status=409)
+
     order.status = OrderStatus.CANCELLED
+    # A voided order is food that was never cooked, so the ingredients go back.
+    # As its own movement rather than a deletion, so the ledger shows both.
+    await stock_deduction.reverse_sale(db, order, user.id)
     await db.commit()
     return ok(message="Order cancelled")

@@ -48,13 +48,18 @@ class MovementReason:
     WASTE = "waste"         # spoiled, burnt, dropped
     COUNT = "count"         # physical count corrected the book figure
     RETURNED = "returned"   # sent back to the supplier
+    SALE = "sale"           # deducted automatically when a dish was sold
 
-    ALL = (RECEIVED, USED, WASTE, COUNT, RETURNED)
+    ALL = (RECEIVED, USED, WASTE, COUNT, RETURNED, SALE)
+
+    # Reasons a PERSON may record. `sale` is written by the order flow and must
+    # not be keyable by hand, or the automatic figure becomes editable.
+    MANUAL = (RECEIVED, USED, WASTE, COUNT, RETURNED)
 
     # The ones that should normally reduce stock. Used for reporting, not as a
     # constraint — a returned delivery is a decrease, a corrected undercount is
     # an increase, and forcing signs here would just make people lie to the form.
-    OUTGOING = (USED, WASTE, RETURNED)
+    OUTGOING = (USED, WASTE, RETURNED, SALE)
 
 
 class StockItem(BaseModel):

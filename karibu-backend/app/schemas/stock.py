@@ -76,8 +76,11 @@ class MovementCreate(BaseModel):
     @field_validator("reason")
     @classmethod
     def known_reason(cls, v: str) -> str:
-        if v not in MovementReason.ALL:
-            raise ValueError(f"Reason must be one of: {', '.join(MovementReason.ALL)}")
+        # MANUAL, not ALL. `sale` is written by the order flow; letting it be
+        # keyed by hand would make the automatic figure editable, which is the
+        # one thing the deduction is supposed to guarantee.
+        if v not in MovementReason.MANUAL:
+            raise ValueError(f"Reason must be one of: {', '.join(MovementReason.MANUAL)}")
         return v
 
     @field_validator("quantity")
@@ -86,3 +89,16 @@ class MovementCreate(BaseModel):
         if to_milli(v) == 0:
             raise ValueError("Quantity must not be zero")
         return v
+
+
+class RecipeSet(BaseModel):
+    """How much of a stock item one sale of a dish consumes.
+
+    Two ways to say the same thing. `portions_per_unit` is how an owner thinks
+    — "10kg gives 40 plates" is 4 plates per kg — and `quantity` is the direct
+    figure. Exactly one is needed; giving neither clears the link.
+    """
+
+    menu_item_id: str
+    portions_per_unit: float | None = Field(default=None, gt=0, le=10_000)
+    quantity: float | None = Field(default=None, ge=0, le=1_000_000)
