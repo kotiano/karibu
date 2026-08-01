@@ -131,6 +131,14 @@ class StockMovement(BaseModel):
     # without a running sum, and it exposes a divergence rather than hiding one.
     balance_after_milli: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # What this delivery actually cost, when it was a purchase.
+    #
+    # Separate from StockItem.unit_cost_cents, which is the standing price used
+    # to value the shelf. What a specific delivery cost is a different fact —
+    # prices move, and overwriting the standing cost with the latest invoice
+    # would silently restate the value of everything already on the shelf.
+    total_cost_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Who did it. Nullable only because a user can be deleted; the point of this
     # table is that a change has a name against it.
     recorded_by_id: Mapped[str | None] = mapped_column(

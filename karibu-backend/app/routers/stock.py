@@ -17,7 +17,10 @@ from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import DbDep, SubscribedUser, require_roles
 from app.core.security import APIError
-from app.models import MovementReason, StockItem, StockMovement, StockUnit, UserRole
+from app.models import (
+    Expense, ExpenseCategory, MovementReason, StockItem, StockMovement,
+    StockUnit, UserRole,
+)
 from app.schemas.common import ok
 from app.schemas.stock import MovementCreate, StockItemCreate, StockItemUpdate, to_milli
 
@@ -203,21 +206,54 @@ async def record_movement(
         )
 
     item.quantity_milli = new_balance
-    db.add(
-        StockMovement(
-            stock_item_id=item.id,
-            delta_milli=delta,
-            reason=body.reason,
-            note=(body.note or "").strip() or None,
-            balance_after_milli=new_balance,
+    cost_cents = round(body.cost * 100) if body.cost else None
+
+    movement = StockMovement(
+        stock_item_id=item.id,
+        delta_milli=delta,
+        reason=body.reason,
+        note=(body.note or "").strip() or None,
+        balance_after_milli=new_balance,
+        total_cost_cents=cost_cents,
+        recorded_by_id=user.id,
+    )
+    db.add(movement)
+
+    # A COSTED DELIVERY WRITES ITS OWN EXPENSE. Recording the purchase twice by
+    # hand — once here, once on the expenses screen — is how the two drifted:
+    # forget the expense and costs are understated, forget the delivery and the
+    # shelf count is wrong. One action, both records, joined by id.
+    expense = None
+    if cost_cents and body.reason == MovementReason.RECEIVED:
+        supplier = (body.supplier or "").strip() or item.supplier
+        expense = Expense(
+            restaurant_id=user.restaurant_id,
+            category=ExpenseCategory.STOCK,
+            amount_cents=cost_cents,
+            payee=supplier,
+            note=f"{abs(delta) / 1000:g} {item.unit} {item.name}",
+            method="cash" if body.paid else "credit",
+            is_paid=body.paid,
+            paid_at=datetime.utcnow() if body.paid else None,
             recorded_by_id=user.id,
         )
-    )
-    # Item and movement commit TOGETHER. Two commits could leave the running
-    # total updated with no ledger entry explaining it.
+        db.add(expense)
+        await db.flush()
+        expense.stock_movement_id = movement.id
+
+    # Item, movement and expense commit TOGETHER. Separate commits could leave
+    # a running total with no ledger entry, or a delivery with no cost.
     await db.commit()
     await db.refresh(item)
-    return ok(_item_dict(item), message="Stock updated")
+    return ok(
+        {**_item_dict(item), "expense_created": expense is not None},
+        message=(
+            "Stock updated"
+            if expense is None
+            else ("Stock and expense recorded" if body.paid
+                  else "Stock recorded — added to what you owe suppliers")
+        ),
+    )
 
 
 @router.get("/{item_id}/movements", dependencies=[Depends(require_roles(*MANAGERS))])

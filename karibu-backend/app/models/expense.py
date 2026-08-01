@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
@@ -60,9 +60,30 @@ class Expense(BaseModel):
     method: Mapped[str] = mapped_column(String(20), default="cash", nullable=False)
     reference: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
-    # The date the money actually left, which is NOT necessarily when it was
-    # keyed in — an owner records Friday's payments on Monday, and putting them
-    # on Monday would misstate both days' figures.
+    # INCURRED IS NOT PAID. A delivery taken on credit is a real cost the
+    # moment it arrives and is not money out of the till until the supplier is
+    # settled. Collapsing the two made "spent today" wrong in both directions:
+    # it counted credit purchases as cash gone, and it showed nothing at all
+    # when that supplier was finally paid weeks later.
+    is_paid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # The stock delivery this cost came from, when it came from one.
+    #
+    # Buying stock is ONE event that used to need TWO manual entries — a stock
+    # movement and an expense — with nothing tying them together. They drifted:
+    # record the delivery and forget the expense and the books understate cost;
+    # record the expense and forget the delivery and the shelf count is wrong.
+    # Now the movement creates the expense, and this is the join.
+    stock_movement_id: Mapped[str | None] = mapped_column(
+        ForeignKey("stock_movements.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    # The date the cost belongs to, which is NOT necessarily when it was keyed
+    # in — an owner records Friday's purchases on Monday, and putting them on
+    # Monday would misstate both days' figures.
     spent_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False, index=True
     )

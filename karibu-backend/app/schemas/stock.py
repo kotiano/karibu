@@ -64,6 +64,15 @@ class MovementCreate(BaseModel):
     quantity: float = Field(ge=-1_000_000, le=1_000_000)
     note: str | None = None
 
+    # A delivery's cost. Given here rather than keyed separately as an expense,
+    # because buying stock is ONE event — see the comment on
+    # Expense.stock_movement_id.
+    cost: float | None = Field(default=None, ge=0, le=100_000_000)
+    # False = taken on credit. The cost is real immediately; the money is not
+    # out of the till until the supplier is settled.
+    paid: bool = True
+    supplier: str | None = Field(default=None, max_length=120)
+
     @field_validator("reason")
     @classmethod
     def known_reason(cls, v: str) -> str:

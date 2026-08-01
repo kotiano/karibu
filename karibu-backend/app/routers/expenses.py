@@ -31,6 +31,10 @@ def _expense_dict(e: Expense) -> dict:
         "payee": e.payee,
         "method": e.method,
         "reference": e.reference,
+        "is_paid": e.is_paid,
+        "paid_at": e.paid_at,
+        "due_date": e.due_date,
+        "from_stock": e.stock_movement_id is not None,
         "spent_at": e.spent_at,
         "recorded_by": e.recorded_by.full_name if e.recorded_by else None,
     }
@@ -75,10 +79,26 @@ async def list_expenses(
     ).all()
 
     total_cents = sum(c or 0 for _, c in breakdown)
+
+    # Summed in SQL over the same window rather than from `rows`, which is a
+    # page — a "paid" figure covering only the visible rows would quietly
+    # understate what left the till.
+    paid_cents = (
+        await db.execute(
+            select(func.coalesce(func.sum(Expense.amount_cents), 0))
+            .where(*base, Expense.is_paid.is_(True))
+        )
+    ).scalar() or 0
+
     return ok(
         {
             "expenses": [_expense_dict(e) for e in rows],
+            # THREE FIGURES, not one. "Total" is what was incurred; an owner
+            # asking "what did I spend today" means cash out, and "what do I
+            # owe" is the supplier credit sitting between them.
             "total": round(total_cents / 100, 2),
+            "total_paid": round(paid_cents / 100, 2),
+            "total_unpaid": round((total_cents - paid_cents) / 100, 2),
             "by_category": {
                 cat: round((cents or 0) / 100, 2) for cat, cents in breakdown
             },
@@ -306,3 +326,30 @@ async def expenses_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/{expense_id}/pay", dependencies=[Depends(require_roles(*MANAGERS))])
+async def mark_expense_paid(expense_id: str, user: SubscribedUser, db: DbDep):
+    """Settle a cost that was taken on credit.
+
+    The cost itself does not move — it was already counted on the day the goods
+    arrived. What changes is that the money has now left, so it stops counting
+    as owed to a supplier and starts counting as cash out.
+    """
+    result = await db.execute(
+        select(Expense).where(
+            Expense.id == expense_id, Expense.restaurant_id == user.restaurant_id
+        )
+    )
+    expense = result.scalar_one_or_none()
+    if not expense:
+        raise APIError("Expense not found", status=404)
+    if expense.is_paid:
+        raise APIError("That is already paid", status=422,
+                       errors={"is_paid": "already"})
+
+    expense.is_paid = True
+    expense.paid_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(expense)
+    return ok(_expense_dict(expense), message="Marked as paid")
