@@ -7,13 +7,14 @@ difference between milliseconds and seconds once a busy restaurant has months
 of orders. The one Python-side pass (daily revenue series) reads bare
 (timestamp, cents) tuples, not ORM objects, and is bounded by the 90-day cap.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.dependencies import DbDep, SubscribedUser, require_roles
+from app.core.timezone import day_bounds_utc, days_ago_utc, to_local
 from app.core.serializers import order_dict
 from app.models import (
     Debt, DebtStatus, Order, OrderItem, OrderStatus, Payment, Restaurant, User,
@@ -34,15 +35,21 @@ PAYMENT_LABELS = {
 
 
 def _day_bounds(day: datetime):
-    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, start + timedelta(days=1)
+    """Kept for callers that pass an explicit day; both delegate to the
+    timezone helper so "today" is the restaurant's day, not UTC's."""
+    return day_bounds_utc(day.replace(tzinfo=timezone.utc))
 
 
 @router.get("/dashboard")
 async def dashboard(user: SubscribedUser, db: DbDep):
     rid = user.restaurant_id
-    today_start, today_end = _day_bounds(datetime.utcnow())
-    yday_start, yday_end = _day_bounds(datetime.utcnow() - timedelta(days=1))
+    # LOCAL day boundaries. These were UTC, so "sales today" reset at 3am in
+    # Nairobi and anything sold between midnight and 3am counted toward the
+    # previous day — a restaurant open past midnight closed its books on the
+    # wrong figures.
+    today_start, today_end = day_bounds_utc()
+    yday_start = days_ago_utc(1)
+    yday_end = today_start
 
     async def sales_between(start, end) -> int:
         result = await db.execute(
@@ -101,9 +108,12 @@ async def dashboard(user: SubscribedUser, db: DbDep):
             Payment.received_at < today_end,
         )
     )
+    # Bucketed by the LOCAL hour. Using received_at.hour directly put a 1pm
+    # sale in the 10am column, because the stored value is UTC.
     buckets: dict[int, int] = {}
     for received_at, cents in hourly_res.all():
-        buckets[received_at.hour] = buckets.get(received_at.hour, 0) + (cents or 0)
+        hour = to_local(received_at).hour
+        buckets[hour] = buckets.get(hour, 0) + (cents or 0)
     # A fixed 7am–9pm window so the chart has a stable x-axis all day instead of
     # growing a column each hour — and so a quiet hour reads as a quiet hour
     # rather than vanishing.
@@ -112,18 +122,21 @@ async def dashboard(user: SubscribedUser, db: DbDep):
     ]
 
     # ── 12-day trend, for the sparkline ─────────────────────────────────────
-    trend_start = today_start - timedelta(days=11)
+    trend_start = days_ago_utc(11)
     trend_res = await db.execute(
         select(Payment.received_at, Payment.amount_cents)
         .join(Order, Payment.order_id == Order.id)
         .where(Order.restaurant_id == rid, Payment.received_at >= trend_start)
     )
+    # Keyed by the LOCAL date for the same reason as the hours above — a sale
+    # at 1am local belongs to that local day, not the UTC one before it.
     day_totals: dict[str, int] = {}
     for received_at, cents in trend_res.all():
-        key = received_at.date().isoformat()
+        key = to_local(received_at).date().isoformat()
         day_totals[key] = day_totals.get(key, 0) + (cents or 0)
+    first_day = to_local(trend_start).date()
     sales_trend = [
-        round(day_totals.get((trend_start + timedelta(days=i)).date().isoformat(), 0) / 100, 2)
+        round(day_totals.get((first_day + timedelta(days=i)).isoformat(), 0) / 100, 2)
         for i in range(12)
     ]
 
@@ -232,9 +245,7 @@ async def dashboard(user: SubscribedUser, db: DbDep):
 @router.get("/sales", dependencies=[Depends(require_roles(*UserRole.MANAGERS))])
 async def sales_report(user: SubscribedUser, db: DbDep, days: int = Query(default=7, ge=1, le=90)):
     rid = user.restaurant_id
-    window_start = (datetime.utcnow() - timedelta(days=days - 1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    window_start = days_ago_utc(days - 1)
 
     # Gross revenue: one SUM, computed by the DB.
     gross_res = await db.execute(
@@ -284,11 +295,10 @@ async def sales_report(user: SubscribedUser, db: DbDep, days: int = Query(defaul
         .join(Order, Payment.order_id == Order.id)
         .where(Order.restaurant_id == rid, Payment.received_at >= window_start)
     )
-    daily = {
-        (window_start + timedelta(days=i)).strftime("%Y-%m-%d"): 0 for i in range(days)
-    }
+    first = to_local(window_start).date()
+    daily = {(first + timedelta(days=i)).isoformat(): 0 for i in range(days)}
     for received_at, cents in series_res.all():
-        key = received_at.strftime("%Y-%m-%d")
+        key = to_local(received_at).date().isoformat()
         if key in daily:
             daily[key] += cents
     revenue_series = [{"date": k, "revenue": round(v / 100, 2)} for k, v in daily.items()]
@@ -324,9 +334,7 @@ async def sales_csv(
     from fastapi.responses import StreamingResponse
     from sqlalchemy.orm import selectinload
 
-    window_start = (datetime.utcnow() - timedelta(days=days - 1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    window_start = days_ago_utc(days - 1)
 
     result = await db.execute(
         select(Order)
@@ -396,9 +404,7 @@ async def sales_pdf(
     the CSV is the right file and this one would just be a worse spreadsheet.
     """
     rid = user.restaurant_id
-    window_start = (datetime.utcnow() - timedelta(days=days - 1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    window_start = days_ago_utc(days - 1)
 
     gross_res = await db.execute(
         select(func.coalesce(func.sum(Payment.amount_cents), 0))
@@ -454,7 +460,7 @@ async def sales_pdf(
         (window_start + timedelta(days=i)).strftime("%Y-%m-%d"): 0 for i in range(days)
     }
     for received_at, cents in series_res.all():
-        key = received_at.strftime("%Y-%m-%d")
+        key = to_local(received_at).date().isoformat()
         if key in daily:
             daily[key] += cents or 0
 

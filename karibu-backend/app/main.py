@@ -72,6 +72,31 @@ def _configure_logging() -> None:
 _configure_logging()
 
 
+def _mark_datetimes_as_utc() -> None:
+    """Serialise every outgoing datetime with an explicit Z.
+
+    Storage is naive UTC throughout. FastAPI rendered that as
+    "2026-08-01T05:29:22" with no offset, and `new Date()` in a browser parses
+    a bare datetime as LOCAL time — so every timestamp displayed three hours
+    early in Nairobi. An order taken at 08:13 showed 05:13.
+
+    Patched on the shared encoder table rather than per-response, because most
+    endpoints hand back plain dicts rather than Pydantic models, and a
+    per-serialiser fix would be forgotten by the next one written. This is a
+    statement about data that was always UTC, not a conversion.
+    """
+    from datetime import datetime
+
+    import fastapi.encoders as encoders
+
+    from app.core.timezone import to_utc_iso
+
+    encoders.ENCODERS_BY_TYPE[datetime] = to_utc_iso
+
+
+_mark_datetimes_as_utc()
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail fast if we're in production with placeholder secrets — refusing to

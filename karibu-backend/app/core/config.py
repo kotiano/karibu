@@ -22,6 +22,10 @@ class Settings(BaseSettings):
 
     ENV: str = "development"  # development | production | testing
 
+    # The restaurant's wall clock. Storage stays UTC; this decides where a
+    # DAY starts, which is what "sales today" actually means to an owner.
+    TIMEZONE: str = "Africa/Nairobi"
+
     # --- Security ------------------------------------------------------------
     SECRET_KEY: str = "dev-secret-change-me"
     JWT_SECRET_KEY: str = "dev-jwt-secret-change-me"
