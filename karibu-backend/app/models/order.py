@@ -80,6 +80,18 @@ class Order(BaseModel):
         back_populates="order", cascade="all, delete-orphan", lazy="selectin"
     )
 
+    # A shareable receipt link, issued on demand and never expiring.
+    #
+    # The token IS the authorisation — the receipt page is public, because the
+    # person it is for has no account and never will. A 256-bit token is not
+    # guessable, and what it exposes is exactly what a paper receipt exposes:
+    # one order's lines and the restaurant's name. Stored in plaintext, unlike
+    # the auth tokens, precisely BECAUSE it must be re-displayable: a customer
+    # who loses the message needs the same link again, not a new one.
+    receipt_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
+
     __table_args__ = (
         # Every list/report query filters by restaurant + (recency | status).
         # Composite indexes turn those from tenant-wide scans into index seeks.

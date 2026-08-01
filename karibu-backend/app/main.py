@@ -35,6 +35,7 @@ from app.routers import (
     stock,
     menu,
     orders,
+    receipts,
 )
 
 logger = logging.getLogger("karibu")
@@ -304,6 +305,7 @@ async def public_config():
     }
 
 
+app.include_router(receipts.router)
 app.include_router(staff.router)
 app.include_router(stock.router)
 
