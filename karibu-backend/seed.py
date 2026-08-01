@@ -66,7 +66,24 @@ MENU = {
 }
 
 
+def _refuse_in_production(what: str, instead: str) -> None:
+    """These scripts predate the app having a real database.
+
+    ENV is the only thing separating the dev database from the live one, which
+    is exactly the kind of difference that is obvious only afterwards.
+    """
+    if settings.ENV == "production":
+        raise SystemExit(
+            f"REFUSING TO RUN: ENV=production. {what} {instead}"
+        )
+
+
 async def seed():
+    _refuse_in_production(
+        "seed.py DELETES existing data and rebuilds demo rows.",
+        "Set ENV=development for this command if the target really is a "
+        "throwaway database.",
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

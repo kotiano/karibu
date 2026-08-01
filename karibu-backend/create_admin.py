@@ -22,6 +22,7 @@ import sys
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.core.passwords import password_problem
 from app.models import Restaurant, User, UserRole
@@ -38,8 +39,14 @@ async def main() -> int:
     args = parser.parse_args()
     email = args.email.strip().lower()
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # NEVER create_all against production. Alembic owns that schema, and
+    # create_all builds tables from the models WITHOUT stamping
+    # alembic_version — so running this before `alembic upgrade head` would
+    # create the pending tables and then make the migration fail with
+    # "relation already exists". Convenience for a fresh dev database only.
+    if settings.ENV != "production":
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as db:
         user = (
