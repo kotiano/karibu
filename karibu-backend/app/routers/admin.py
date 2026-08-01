@@ -56,8 +56,13 @@ async def overview(admin: PlatformAdmin, db: DbDep):
     )
     by_status = {status: count for status, count in status_res.all()}
 
+    # Counted through the subscription for the same reason as the list above:
+    # the platform's own HQ row is not a customer, and reporting it as one
+    # overstates the business to the person least able to notice.
     restaurants_total = (
-        await db.execute(select(func.count()).select_from(Restaurant))
+        await db.execute(
+            select(func.count()).select_from(Subscription)
+        )
     ).scalar() or 0
     users_total = (
         await db.execute(select(func.count()).select_from(User))
@@ -126,9 +131,14 @@ async def list_restaurants(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    # INNER join, not outer. A restaurant with no subscription is not a
+    # customer — it is the "Karibu Platform HQ" placeholder create_admin.py
+    # makes because every user needs a tenant. Listing it counted our own admin
+    # row as a paying restaurant and offered subscription actions that could
+    # only ever 404.
     stmt = (
         select(Restaurant, Subscription)
-        .join(Subscription, Subscription.restaurant_id == Restaurant.id, isouter=True)
+        .join(Subscription, Subscription.restaurant_id == Restaurant.id)
         .order_by(Restaurant.created_at.desc())
     )
     if status:
