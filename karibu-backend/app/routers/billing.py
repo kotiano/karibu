@@ -32,7 +32,27 @@ async def get_subscription(user: CurrentUser, db: DbDep):
     sub = result.scalar_one_or_none()
     if not sub:
         raise APIError("No subscription found", status=404)
-    return ok({"subscription": subscription_dict(sub)})
+    restaurant = await db.get(Restaurant, user.restaurant_id)
+    return ok({
+        "subscription": subscription_dict(
+            sub, restaurant.billing_phone if restaurant else None
+        )
+    })
+
+
+def _looks_like_mpesa(phone: str) -> bool:
+    """Safaricom/Airtel shapes, before Paystack's own normalisation.
+
+    Checked here rather than only in the browser: a bad number produces a
+    charge that silently never prompts anyone, which looks like the app is
+    broken rather than like a typo.
+    """
+    digits = "".join(c for c in phone if c.isdigit())
+    return (
+        (len(digits) == 10 and digits.startswith("0"))
+        or (len(digits) == 12 and digits.startswith("254"))
+        or (len(digits) == 9 and digits[0] in "17")
+    )
 
 
 @router.post("/pay")
@@ -50,11 +70,22 @@ async def pay_now(
     if not sub:
         raise APIError("No subscription found", status=404)
 
-    phone = body.phone or restaurant.billing_phone
+    phone = (body.phone or restaurant.billing_phone or "").strip()
     if not phone:
-        raise APIError("No billing phone on file. Add one to pay.", status=422, errors={"phone": "required"})
-    if body.phone:
-        restaurant.billing_phone = body.phone
+        raise APIError(
+            "Which M-Pesa number should we send the prompt to?",
+            status=422, errors={"phone": "required"},
+        )
+    if not _looks_like_mpesa(phone):
+        raise APIError(
+            "That doesn't look like an M-Pesa number. Use 07XX XXX XXX.",
+            status=422, errors={"phone": "invalid"},
+        )
+    # Saved, so it is asked for once rather than every time. A number given
+    # here is also a correction — paying from a different line is exactly when
+    # someone notices the one on file is wrong.
+    if body.phone and body.phone.strip() != restaurant.billing_phone:
+        restaurant.billing_phone = body.phone.strip()
         await db.commit()
 
     charge = await billing.initiate_charge(db, sub.id, phone_override=phone)

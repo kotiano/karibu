@@ -73,8 +73,12 @@ def order_dict(order: Order, detailed: bool = True) -> dict:
     return data
 
 
-def subscription_dict(sub: Subscription) -> dict:
+def subscription_dict(sub: Subscription, billing_phone: str | None = None) -> dict:
     return {
+        # What the M-Pesa prompt will go to, so the billing screen can offer to
+        # set or change it instead of refusing to charge and telling the user to
+        # find the setting themselves.
+        "billing_phone": billing_phone,
         "id": sub.id,
         "status": sub.status,
         "price": round(sub.price_cents / 100, 2),
