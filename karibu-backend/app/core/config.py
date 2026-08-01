@@ -58,7 +58,11 @@ class Settings(BaseSettings):
     # --- Subscription / billing ---------------------------------------------
     SUBSCRIPTION_PRICE_CENTS: int = 49900  # KSh 499.00
     SUBSCRIPTION_CURRENCY: str = "KES"
-    TRIAL_DAYS: int = 14
+    # SEVEN, not fourteen. The default matters as much as the env var: a
+    # deployment that never sets TRIAL_DAYS silently gets whatever is written
+    # here, and "we changed it in .env on one laptop" is not a change to the
+    # product. Keep this in step with the Terms.
+    TRIAL_DAYS: int = 7
     BILLING_PERIOD_DAYS: int = 30
     DUNNING_RETRY_HOURS: str = "0,24,72,120"
     CHARGE_STALE_MINUTES: int = 10
