@@ -93,7 +93,7 @@ def _issue_tokens(user: User) -> dict:
 @router.post("/register", status_code=201)
 @limiter.limit(settings.RATELIMIT_LOGIN)
 async def register(request: Request, body: RegisterRequest, db: DbDep):
-    """Register a restaurant owner: creates the restaurant + a 14-day trial."""
+    """Register a restaurant owner: creates the restaurant + a free trial."""
     email = body.email.strip().lower()
 
     problem = password_problem(body.password)
@@ -180,7 +180,8 @@ async def register(request: Request, body: RegisterRequest, db: DbDep):
         },
         message=(
             "Almost there — check your email for a verification code, "
-            "then confirm it in the app. Your 14-day free trial is ready."
+            "then confirm it in the app. Your "
+            f"{settings.TRIAL_DAYS}-day free trial is ready."
         )
         if sent
         else (

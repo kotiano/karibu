@@ -129,8 +129,24 @@ async def start_trial(db: AsyncSession, restaurant: Restaurant, phone: str | Non
 
 # --- Charge creation -------------------------------------------------------
 def _period_for(sub: Subscription, now: datetime) -> tuple[datetime, datetime]:
+    """When the period this charge pays for starts and ends.
+
+    PAYING EARLY MUST NOT COST THE REST OF THE TRIAL. current_period_end is None
+    while trialing, so this used to fall through to `now`: someone who paid on
+    day 2 of a 7-day trial lost the remaining 5 days and their paid month began
+    immediately. They were charged the full price for less than they were
+    promised — and with live keys that is real money.
+
+    A paid period therefore starts at whichever is later of the current period's
+    end and the trial's end, so the days already promised are honoured and the
+    30 days bought are added on top.
+    """
     days = settings.BILLING_PERIOD_DAYS
     start = sub.current_period_end or now
+    if sub.trial_ends_at and sub.trial_ends_at > start:
+        start = sub.trial_ends_at
+    # A period that lapsed long ago is not back-dated — that would sell someone
+    # a month that has already passed.
     if start < now - timedelta(days=days):
         start = now
     return start, start + timedelta(days=days)

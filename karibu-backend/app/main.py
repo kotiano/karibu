@@ -285,6 +285,25 @@ app.include_router(menu.router)
 app.include_router(orders.router)
 app.include_router(analytics.router)
 app.include_router(expenses.router)
+@app.get("/api/config", tags=["config"])
+async def public_config():
+    """Public, unauthenticated: the few facts the signup page has to state.
+
+    The trial length lived as the literal "14 days" in the signup copy while
+    production ran on 7. With live billing that is not a typo, it is a promise
+    the charge then breaks. Serving the configured value means the number shown
+    and the number enforced cannot drift apart again.
+    """
+    return {
+        "success": True,
+        "data": {
+            "trial_days": settings.TRIAL_DAYS,
+            "price": settings.SUBSCRIPTION_PRICE_CENTS / 100,
+            "currency": settings.SUBSCRIPTION_CURRENCY,
+        },
+    }
+
+
 app.include_router(staff.router)
 app.include_router(stock.router)
 
