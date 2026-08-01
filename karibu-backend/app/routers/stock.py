@@ -31,8 +31,17 @@ router = APIRouter(prefix="/api/stock", tags=["stock"])
 MANAGERS = UserRole.MANAGERS
 
 
-def _item_dict(item: StockItem) -> dict:
+def _item_dict(item: StockItem, recipes: list | None = None) -> dict:
+    lines = recipes or []
+    # Portions remaining, measured by the dish that eats the MOST per plate —
+    # the conservative reading. Reporting the most generous one would promise
+    # servings the shelf cannot cover if the wrong dish is ordered.
+    heaviest = max((r.quantity_milli for r in lines), default=0)
     return {
+        "dish_count": len(lines),
+        "portions_left": (
+            round(item.quantity_milli / heaviest, 1) if heaviest > 0 else None
+        ),
         "id": item.id,
         "name": item.name,
         "unit": item.unit,
@@ -95,6 +104,18 @@ async def list_stock(
     )
     items = list(result.scalars().all())
 
+    # One query for every recipe line on this restaurant's items, grouped in
+    # Python — a pantry is tens of rows, and per-item queries would be a loop
+    # of round trips for a list screen.
+    recipe_res = await db.execute(
+        select(RecipeLine).where(
+            RecipeLine.stock_item_id.in_([i.id for i in items] or [""])
+        )
+    )
+    by_item: dict[str, list] = {}
+    for line in recipe_res.scalars().all():
+        by_item.setdefault(line.stock_item_id, []).append(line)
+
     # is_low is a Python property (it depends on two columns and a "0 disables
     # it" rule), so the filter happens here. The list is one restaurant's
     # pantry — tens of rows, not thousands.
@@ -104,16 +125,30 @@ async def list_stock(
 
     # None where no item has a cost, rather than 0 — "we do not track cost" and
     # "the stock is worthless" are different statements.
+    dishes_res = await db.execute(
+        select(MenuItem)
+        .where(
+            MenuItem.restaurant_id == user.restaurant_id,
+            MenuItem.is_archived.is_(False),
+        )
+        .order_by(MenuItem.name.asc())
+    )
+
     priced = [i for i in items if i.unit_cost_cents is not None]
     total_value = sum(i.value_cents or 0 for i in priced) if priced else None
 
     return ok(
         {
-            "items": [_item_dict(i) for i in items],
+            "items": [_item_dict(i, by_item.get(i.id)) for i in items],
             "low_count": len(low),
             "total_value": total_value / 100 if total_value is not None else None,
             "units": list(StockUnit.ALL),
             "reasons": list(MovementReason.MANUAL),
+            # So "which dish does this make?" can be asked while ADDING the
+            # ingredient, rather than only in a separate step afterwards.
+            "menu_items": [
+                {"id": m.id, "name": m.name} for m in dishes_res.scalars().all()
+            ],
         }
     )
 
@@ -147,9 +182,43 @@ async def create_stock_item(body: StockItemCreate, user: SubscribedUser, db: DbD
             )
         )
 
+    # Linked to a dish here if the yield was given, so a new ingredient starts
+    # deducting immediately instead of needing a second trip through another
+    # screen — which is where it was, and where nobody found it.
+    linked = None
+    if body.menu_item_id and body.portions_per_unit:
+        dish = (
+            await db.execute(
+                select(MenuItem).where(
+                    MenuItem.id == body.menu_item_id,
+                    MenuItem.restaurant_id == user.restaurant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not dish:
+            raise APIError("Menu item not found", status=404,
+                           errors={"menu_item_id": "unknown"})
+        recipe = RecipeLine(
+            menu_item_id=dish.id,
+            stock_item_id=item.id,
+            quantity_milli=round(1000 / body.portions_per_unit),
+        )
+        db.add(recipe)
+        linked = dish.name
+
     await db.commit()
     await db.refresh(item)
-    return ok(_item_dict(item), message=f"{item.name} added to stock")
+    # Passed through so the response reports the link it just made — otherwise
+    # the card says "won't deduct on sale" until the next reload.
+    return ok(
+        _item_dict(item, [recipe] if linked else None),
+        message=(
+            f"{item.name} added to stock"
+            if not linked
+            else f"{item.name} added — one {linked} now uses "
+                 f"{1 / body.portions_per_unit:g} {item.unit}"
+        ),
+    )
 
 
 @router.patch("/{item_id}", dependencies=[Depends(require_roles(*MANAGERS))])

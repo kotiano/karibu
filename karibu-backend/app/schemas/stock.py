@@ -23,6 +23,12 @@ class StockItemCreate(BaseModel):
     supplier: str | None = Field(default=None, max_length=120)
     note: str | None = None
 
+    # Optional: link the new ingredient to a dish as it is created. Asked as
+    # yield — "one kg makes 4 plates" — because that is the number the person
+    # holding the delivery actually knows.
+    menu_item_id: str | None = None
+    portions_per_unit: float | None = Field(default=None, gt=0, le=10_000)
+
     @field_validator("unit")
     @classmethod
     def known_unit(cls, v: str) -> str:
@@ -47,6 +53,12 @@ class StockItemUpdate(BaseModel):
     unit_cost: float | None = Field(default=None, ge=0, le=10_000_000)
     supplier: str | None = Field(default=None, max_length=120)
     note: str | None = None
+
+    # Optional: link the new ingredient to a dish as it is created. Asked as
+    # yield — "one kg makes 4 plates" — because that is the number the person
+    # holding the delivery actually knows.
+    menu_item_id: str | None = None
+    portions_per_unit: float | None = Field(default=None, gt=0, le=10_000)
 
     @field_validator("unit")
     @classmethod

@@ -165,3 +165,56 @@ def test_recipes_are_tenant_scoped(client, mail_log, owner):
     assert client.post(f"/api/stock/{item['id']}/recipes",
                       json={"menu_item_id": owner["item"]["id"], "portions_per_unit": 4},
                       headers=h).status_code == 404
+
+
+def test_the_yield_can_be_set_while_adding_the_item(client, owner):
+    """The question belongs where the stock is entered — it was only reachable
+    through a separate sheet, and nobody found it there."""
+    r = client.post("/api/stock", json={
+        "name": "Goat", "unit": "kg", "quantity": 10,
+        "menu_item_id": owner["item"]["id"], "portions_per_unit": 4,
+    }, headers=owner["headers"])
+    assert r.status_code == 201, r.text
+
+    item = r.json()["data"]
+    assert item["dish_count"] == 1
+    # 10kg at 0.25kg a plate.
+    assert item["portions_left"] == 40.0
+
+    # And it deducts straight away, with no second trip.
+    order(client, owner, owner["item"]["id"], qty=2)
+    assert level(client, owner, item["id"]) == 9.5
+
+
+def test_an_item_with_no_dish_says_so(client, owner):
+    """Cooking gas is not portioned into anything, and the card must not imply
+    a deduction that will never happen."""
+    item = stock_item(client, owner, name="Cooking gas", unit="kg")
+    listing = client.get("/api/stock", headers=owner["headers"]).json()["data"]
+    row = next(i for i in listing["items"] if i["id"] == item["id"])
+    assert row["dish_count"] == 0
+    assert row["portions_left"] is None
+
+
+def test_portions_left_uses_the_hungriest_dish(client, owner):
+    """The conservative reading: promising the most generous dish's count would
+    over-promise servings the shelf cannot cover."""
+    second = client.post("/api/menu/items", json={
+        "name": "Big Plate", "price": 900, "category_id": owner["category"]["id"],
+    }, headers=owner["headers"]).json()["data"]
+
+    item = stock_item(client, owner, quantity=10)
+    set_recipe(client, owner, item, owner["item"]["id"], portions_per_unit=10)  # 0.1kg
+    set_recipe(client, owner, item, second["id"], portions_per_unit=2)          # 0.5kg
+
+    listing = client.get("/api/stock", headers=owner["headers"]).json()["data"]
+    row = next(i for i in listing["items"] if i["id"] == item["id"])
+    assert row["portions_left"] == 20.0, "10kg / 0.5kg, not / 0.1kg"
+
+
+def test_adding_with_an_unknown_dish_is_refused(client, owner):
+    r = client.post("/api/stock", json={
+        "name": "Mystery", "unit": "kg", "quantity": 5,
+        "menu_item_id": "not-a-real-id", "portions_per_unit": 4,
+    }, headers=owner["headers"])
+    assert r.status_code == 404
