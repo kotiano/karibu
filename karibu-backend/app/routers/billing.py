@@ -104,6 +104,39 @@ async def pay_now(
     )
 
 
+@router.post("/charges/{charge_id}/verify")
+async def verify_charge(
+    charge_id: str,
+    db: DbDep,
+    restaurant: Restaurant = Depends(get_current_restaurant),
+    _manager=Depends(require_roles(*UserRole.MANAGERS)),
+):
+    """Ask the gateway what happened, now. Safe to poll while a prompt is open."""
+    result = await db.execute(
+        select(Subscription).where(Subscription.restaurant_id == restaurant.id)
+    )
+    sub = result.scalar_one_or_none()
+    if not sub:
+        raise APIError("No subscription found", status=404)
+
+    charge = await db.get(BillingCharge, charge_id)
+    # Scoped through the subscription, not just by id — a charge id from
+    # another tenant must not be verifiable here.
+    if not charge or charge.subscription_id != sub.id:
+        raise APIError("Charge not found", status=404)
+
+    charge = await billing.verify_charge_now(db, charge.id)
+    refreshed = (
+        await db.execute(
+            select(Subscription).where(Subscription.restaurant_id == restaurant.id)
+        )
+    ).scalar_one()
+    return ok({
+        "charge": charge_dict(charge),
+        "subscription": subscription_dict(refreshed, restaurant.billing_phone),
+    })
+
+
 @router.get("/charges")
 async def list_charges(db: DbDep, user=Depends(require_roles(*MANAGERS))):
     result = await db.execute(

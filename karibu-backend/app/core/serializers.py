@@ -4,6 +4,7 @@ FastAPI + Pydantic can serialize simple models directly, but Order/Subscription
 have computed fields (balance, item_count, in_trial, …) that are cleaner to build
 explicitly. Keeping them here matches the shape the existing frontend expects.
 """
+from app.core.config import settings
 from app.models import (
     BillingCharge,
     MenuItem,
@@ -81,7 +82,10 @@ def subscription_dict(sub: Subscription, billing_phone: str | None = None) -> di
         "billing_phone": billing_phone,
         "id": sub.id,
         "status": sub.status,
-        "price": round(sub.price_cents / 100, 2),
+        # The CONFIGURED price, not the stamped one: this is what the next
+        # charge will actually be, and showing a stale figure on the button
+        # someone is about to press is the worst place to be out of date.
+        "price": round(settings.SUBSCRIPTION_PRICE_CENTS / 100, 2),
         "currency": sub.currency,
         "in_trial": sub.in_trial,
         "has_access": sub.has_access,

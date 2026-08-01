@@ -31,6 +31,8 @@ from app.models import (
 from app.services import email as email_service
 from app.services import paystack
 
+logger = logging.getLogger("karibu.billing")
+
 
 async def _owner_for(db: AsyncSession, restaurant_id: str) -> User | None:
     """The restaurant's owner — the human a charge is billed to.
@@ -193,6 +195,23 @@ async def initiate_charge(
     # Paystack requires on every transaction.
     restaurant = await db.get(Restaurant, sub.restaurant_id)
     owner = await _owner_for(db, sub.restaurant_id)
+
+    # THE STORED PRICE FOLLOWS THE CONFIGURED ONE.
+    #
+    # price_cents is stamped at signup and was never revisited, so changing
+    # SUBSCRIPTION_PRICE_CENTS moved the number on the marketing page and
+    # nowhere else — an existing restaurant kept being charged whatever it cost
+    # the day they joined, forever, with nothing on any screen saying so.
+    #
+    # There is deliberately no grandfathering here. Supporting it means an
+    # explicit per-subscription override, and quietly freezing the price is not
+    # that — it is the absence of a decision dressed up as one.
+    if sub.price_cents != settings.SUBSCRIPTION_PRICE_CENTS:
+        logger.info(
+            "Subscription %s price %s -> %s (config changed)",
+            sub.id, sub.price_cents, settings.SUBSCRIPTION_PRICE_CENTS,
+        )
+        sub.price_cents = settings.SUBSCRIPTION_PRICE_CENTS
 
     charge = BillingCharge(
         subscription_id=sub.id,
@@ -476,3 +495,62 @@ async def _expire_stale_charges(db: AsyncSession, now: datetime, stats: dict):
         await _apply_failed_payment(db, sub, fresh)
         stats["stale_failed"] += 1
     await db.commit()
+
+
+async def verify_charge_now(db: AsyncSession, charge_id: str) -> BillingCharge:
+    """Ask Paystack what happened to one charge, right now, and settle it.
+
+    The scheduler already reconciles lost webhooks — but only after
+    CHARGE_STALE_MINUTES, which means a customer who has just approved (or
+    cancelled) an M-Pesa prompt watches "processing" for ten minutes while
+    Paystack has known the answer for seconds. That reads as a broken payment
+    and gets paid a second time.
+
+    Callable from the billing screen so the answer arrives as soon as it exists.
+    Idempotent and safe to poll: a terminal charge is returned untouched, and
+    the subscription row is locked exactly as the webhook path locks it, so a
+    poll racing an inbound webhook cannot apply the same payment twice.
+    """
+    charge = await db.get(BillingCharge, charge_id)
+    if not charge or charge.is_terminal:
+        return charge
+
+    if not charge.provider_reference or not paystack.is_configured():
+        return charge
+
+    try:
+        data = await paystack.verify_transaction(charge.provider_reference)
+    except paystack.PaystackError:
+        # Gateway unreachable. Leave it pending rather than guessing — the
+        # scheduler is still the backstop.
+        return charge
+
+    settled = (data.get("status") or "").lower()
+
+    sub = await _lock_subscription(db, charge.subscription_id)
+    fresh = await db.get(BillingCharge, charge.id)
+    if fresh.is_terminal:
+        return fresh
+
+    if settled == paystack.STATUS_SUCCESS:
+        fresh.mark_success(paystack.extract_receipt(data), 0, "Confirmed")
+        await _apply_successful_payment(db, sub, fresh)
+    elif settled in (paystack.STATUS_FAILED, "abandoned", "reversed"):
+        # A cancelled prompt lands here. Saying so at once is the whole point:
+        # the customer knows to try again instead of waiting on nothing.
+        fresh.mark_failed(
+            None,
+            data.get("gateway_response")
+            or data.get("message")
+            or "Payment was not completed",
+        )
+        await _apply_failed_payment(db, sub, fresh)
+    else:
+        # Genuinely still pending at the gateway — the prompt is on the phone
+        # and unanswered.
+        await db.commit()
+        return fresh
+
+    await db.commit()
+    await db.refresh(fresh)
+    return fresh
